@@ -1,0 +1,41 @@
+import './globals.css';
+import { AuthProvider } from '@/context/AuthContext';
+import { ToastProvider } from '@/components/Toast';
+import SessionWarning from '@/components/SessionWarning';
+
+export const metadata = {
+  title: 'Lead Manager - Contact Outreach Platform',
+  description: 'Manage contacts, assign leads to partners, and track outreach campaigns efficiently.',
+  keywords: 'lead management, contacts, CRM, outreach, partner management',
+  authors: [{ name: 'Lead Manager Team' }],
+  viewport: 'width=device-width, initial-scale=1, maximum-scale=5',
+  themeColor: '#3B82F6',
+  manifest: '/manifest.json',
+  icons: {
+    icon: [
+      { url: '/favicon.ico', sizes: 'any' },
+      { url: '/icon.svg', type: 'image/svg+xml' },
+    ],
+    apple: '/apple-touch-icon.png',
+  },
+  openGraph: {
+    title: 'Lead Manager - Contact Outreach Platform',
+    description: 'Manage contacts, assign leads to partners, and track outreach campaigns efficiently.',
+    type: 'website',
+  },
+};
+
+export default function RootLayout({ children }) {
+  return (
+    <html lang="en">
+      <body>
+        <AuthProvider>
+          <ToastProvider>
+            <SessionWarning />
+            {children}
+          </ToastProvider>
+        </AuthProvider>
+      </body>
+    </html>
+  );
+}
