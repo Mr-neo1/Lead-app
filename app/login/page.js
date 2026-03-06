@@ -37,7 +37,7 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (!loading && user) {
-      router.push(user.role === 'admin' ? '/admin' : '/partner');
+      router.push(user.role === 'admin' ? '/neo01x' : '/partner');
     }
   }, [user, loading, router]);
 
@@ -49,7 +49,7 @@ export default function LoginPage() {
 
     try {
       const loggedInUser = await login(username, password);
-      router.push(loggedInUser.role === 'admin' ? '/admin' : '/partner');
+      router.push(loggedInUser.role === 'admin' ? '/neo01x' : '/partner');
     } catch (err) {
       setError(err.message || 'Login failed');
     } finally {

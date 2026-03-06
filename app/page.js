@@ -13,7 +13,7 @@ export default function Home() {
       if (!user) {
         router.push('/login');
       } else {
-        router.push(user.role === 'admin' ? '/admin' : '/partner');
+        router.push(user.role === 'admin' ? '/neo01x' : '/partner');
       }
     }
   }, [user, loading, router]);

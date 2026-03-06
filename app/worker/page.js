@@ -74,7 +74,7 @@ export default function WorkerDashboard() {
   // Auth check
   useEffect(() => {
     if (!authLoading && !user) router.push('/login');
-    else if (!authLoading && user?.role === ROLES.ADMIN) router.push('/admin');
+    else if (!authLoading && user?.role === ROLES.ADMIN) router.push('/neo01x');
   }, [user, authLoading, router]);
 
   // Fetch ALL contacts (no pagination)
