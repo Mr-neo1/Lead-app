@@ -2,6 +2,7 @@ import './globals.css';
 import { AuthProvider } from '@/context/AuthContext';
 import { ToastProvider } from '@/components/Toast';
 import SessionWarning from '@/components/SessionWarning';
+import { SpeedInsights } from '@vercel/speed-insights/next';
 
 export const metadata = {
   title: 'Lead Manager - Contact Outreach Platform',
@@ -35,6 +36,7 @@ export default function RootLayout({ children }) {
             {children}
           </ToastProvider>
         </AuthProvider>
+        <SpeedInsights />
       </body>
     </html>
   );
