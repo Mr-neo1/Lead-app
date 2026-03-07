@@ -2,6 +2,9 @@ import { NextResponse } from 'next/server';
 import { db, initializeDatabase, schema, eq, generateId, now } from '@/lib/turso';
 import { requireAuth, requireAdmin } from '@/lib/auth';
 
+// Revalidate areas every 60 seconds (they don't change often)
+export const revalidate = 60;
+
 // Get all areas
 export async function GET(request) {
   await initializeDatabase();
@@ -13,7 +16,11 @@ export async function GET(request) {
   try {
     const areas = await database.select().from(schema.areas);
     const sortedAreas = areas.sort((a, b) => a.name.localeCompare(b.name));
-    return NextResponse.json(sortedAreas.map(a => ({ id: a.id, name: a.name, description: a.description })));
+    
+    const response = NextResponse.json(sortedAreas.map(a => ({ id: a.id, name: a.name, description: a.description })));
+    // Cache for 60 seconds on Vercel Edge, allow stale for 5 minutes
+    response.headers.set('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
+    return response;
   } catch (error) {
     console.error('Get areas error:', error);
     return NextResponse.json({ error: 'Failed to fetch areas' }, { status: 500 });

@@ -2,6 +2,9 @@ import { NextResponse } from 'next/server';
 import { db, initializeDatabase, schema, eq } from '@/lib/turso';
 import { requireAuth } from '@/lib/auth';
 
+// Revalidate stats every 30 seconds
+export const revalidate = 30;
+
 // Get contact stats
 export async function GET(request) {
   await initializeDatabase();
@@ -29,7 +32,10 @@ export async function GET(request) {
       followup: contacts.filter(c => c.status === 'followup').length
     };
 
-    return NextResponse.json(stats);
+    const response = NextResponse.json(stats);
+    // Cache for 30 seconds, allow stale for 2 minutes
+    response.headers.set('Cache-Control', 'private, s-maxage=30, stale-while-revalidate=120');
+    return response;
   } catch (error) {
     console.error('Get stats error:', error);
     return NextResponse.json({ error: 'Failed to fetch stats' }, { status: 500 });

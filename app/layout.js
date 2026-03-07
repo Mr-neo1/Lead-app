@@ -8,8 +8,6 @@ export const metadata = {
   description: 'Manage contacts, assign leads to partners, and track outreach campaigns efficiently.',
   keywords: 'lead management, contacts, CRM, outreach, partner management',
   authors: [{ name: 'Lead Manager Team' }],
-  viewport: 'width=device-width, initial-scale=1, maximum-scale=5',
-  themeColor: '#3B82F6',
   manifest: '/manifest.json',
   icons: {
     icon: [
@@ -23,6 +21,14 @@ export const metadata = {
     description: 'Manage contacts, assign leads to partners, and track outreach campaigns efficiently.',
     type: 'website',
   },
+};
+
+// Viewport config (separated for Next.js 14.2+)
+export const viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 5,
+  themeColor: '#3B82F6',
 };
 
 export default function RootLayout({ children }) {

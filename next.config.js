@@ -1,7 +1,17 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
-    serverComponentsExternalPackages: ['nedb-promises']
+    serverComponentsExternalPackages: ['nedb-promises'],
+    // Optimize imports for better tree-shaking and faster builds
+    optimizePackageImports: ['recharts', '@uiw/react-md-editor', 'xlsx', 'libphonenumber-js'],
+  },
+
+  // Enable Partial Prerendering (14.2+) for faster page loads
+  // ppr: 'incremental',
+  
+  // Optimize images
+  images: {
+    formats: ['image/avif', 'image/webp'],
   },
   
   // Security headers
