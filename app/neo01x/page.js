@@ -1,196 +1,676 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { useToast } from '@/components/Toast';
 import Modal, { ConfirmDialog } from '@/components/Modal';
-import {
-  StatusBadge,
-  PriorityBadge,
-  Spinner,
-  StatCard,
-  SearchInput,
-  Select,
-  Button,
-  Pagination,
-  EmptyState,
-} from '@/components/UI';
-import { contactsApi, usersApi, areasApi, activityApi, authApi } from '@/lib/api-client';
+import { contactsApi, usersApi, areasApi, authApi } from '@/lib/api-client';
 import { CONTACT_STATUS, STATUS_CONFIG, PRIORITY, ROLES } from '@/lib/constants';
 
+// ===== Constants =====
+const VIRTUAL_ROW_HEIGHT = 56;
+const BUFFER_SIZE = 10;
+
+const STATUS_OPTIONS = [
+  { value: 'pending', label: 'Pending', color: 'bg-amber-100 text-amber-700 border-amber-300', dot: 'bg-amber-500' },
+  { value: 'accepted', label: 'Accepted', color: 'bg-emerald-100 text-emerald-700 border-emerald-300', dot: 'bg-emerald-500' },
+  { value: 'rejected', label: 'Rejected', color: 'bg-rose-100 text-rose-700 border-rose-300', dot: 'bg-rose-500' },
+  { value: 'followup', label: 'Follow Up', color: 'bg-blue-100 text-blue-700 border-blue-300', dot: 'bg-blue-500' },
+  { value: 'converted', label: 'Converted', color: 'bg-purple-100 text-purple-700 border-purple-300', dot: 'bg-purple-500' },
+];
+
+const PRIORITY_OPTIONS = [
+  { value: 'low', label: 'Low', color: 'text-gray-500' },
+  { value: 'normal', label: 'Normal', color: 'text-blue-600' },
+  { value: 'high', label: 'High', color: 'text-orange-600' },
+  { value: 'urgent', label: 'Urgent', color: 'text-red-600' },
+];
+
+// ===== Utility Hooks =====
+function useDebounce(value, delay = 300) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedValue(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debouncedValue;
+}
+
+// ===== Virtual List Component =====
+const VirtualContactList = memo(function VirtualContactList({
+  contacts,
+  selectedIds,
+  onToggleSelect,
+  onSelectAll,
+  onStatusChange,
+  onPriorityChange,
+  onEdit,
+  onDelete,
+  onAssign,
+  partners,
+}) {
+  const containerRef = useRef(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [containerHeight, setContainerHeight] = useState(600);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    
+    const handleScroll = () => setScrollTop(container.scrollTop);
+    const handleResize = () => setContainerHeight(container.clientHeight);
+    
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    window.addEventListener('resize', handleResize);
+    handleResize();
+    
+    return () => {
+      container.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('resize', handleResize);
+    };
+  }, []);
+
+  const totalHeight = contacts.length * VIRTUAL_ROW_HEIGHT;
+  const startIndex = Math.max(0, Math.floor(scrollTop / VIRTUAL_ROW_HEIGHT) - BUFFER_SIZE);
+  const endIndex = Math.min(
+    contacts.length,
+    Math.ceil((scrollTop + containerHeight) / VIRTUAL_ROW_HEIGHT) + BUFFER_SIZE
+  );
+  const visibleContacts = contacts.slice(startIndex, endIndex);
+  const offsetY = startIndex * VIRTUAL_ROW_HEIGHT;
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      {/* Header */}
+      <div className="grid grid-cols-[40px_2fr_1.2fr_1fr_1fr_120px_100px_100px] gap-2 px-4 py-3 bg-gray-50 border-b font-medium text-sm text-gray-600 sticky top-0 z-10">
+        <div className="flex items-center justify-center">
+          <input
+            type="checkbox"
+            checked={selectedIds.length === contacts.length && contacts.length > 0}
+            onChange={onSelectAll}
+            className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+        </div>
+        <div>Name</div>
+        <div>Phone</div>
+        <div>Area</div>
+        <div>Partner</div>
+        <div>Status</div>
+        <div>Priority</div>
+        <div className="text-center">Actions</div>
+      </div>
+
+      {/* Virtual Scrollable Body */}
+      <div
+        ref={containerRef}
+        className="overflow-y-auto"
+        style={{ height: 'calc(100vh - 380px)', minHeight: '400px' }}
+      >
+        <div style={{ height: totalHeight, position: 'relative' }}>
+          <div style={{ transform: `translateY(${offsetY}px)` }}>
+            {visibleContacts.map(contact => (
+              <ContactRow
+                key={contact.id}
+                contact={contact}
+                isSelected={selectedIds.includes(contact.id)}
+                onToggleSelect={onToggleSelect}
+                onStatusChange={onStatusChange}
+                onPriorityChange={onPriorityChange}
+                onEdit={onEdit}
+                onDelete={onDelete}
+                onAssign={onAssign}
+                partners={partners}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+// ===== Contact Row with Inline Editing =====
+const ContactRow = memo(function ContactRow({
+  contact,
+  isSelected,
+  onToggleSelect,
+  onStatusChange,
+  onPriorityChange,
+  onEdit,
+  onDelete,
+  onAssign,
+  partners,
+}) {
+  const [showStatusDropdown, setShowStatusDropdown] = useState(false);
+  const [showPriorityDropdown, setShowPriorityDropdown] = useState(false);
+  const [showAssignDropdown, setShowAssignDropdown] = useState(false);
+  const [isUpdating, setIsUpdating] = useState(false);
+
+  const handleStatusChange = async (newStatus) => {
+    setIsUpdating(true);
+    setShowStatusDropdown(false);
+    try {
+      await onStatusChange(contact.id, newStatus);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handlePriorityChange = async (newPriority) => {
+    setIsUpdating(true);
+    setShowPriorityDropdown(false);
+    try {
+      await onPriorityChange(contact.id, newPriority);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleAssign = async (partnerId) => {
+    setIsUpdating(true);
+    setShowAssignDropdown(false);
+    try {
+      await onAssign(contact.id, partnerId);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const currentStatus = STATUS_OPTIONS.find(s => s.value === contact.status) || STATUS_OPTIONS[0];
+  const currentPriority = PRIORITY_OPTIONS.find(p => p.value === contact.priority) || PRIORITY_OPTIONS[1];
+
+  return (
+    <div
+      className={`grid grid-cols-[40px_2fr_1.2fr_1fr_1fr_120px_100px_100px] gap-2 px-4 py-3 border-b border-gray-100 hover:bg-gray-50 transition-colors items-center ${
+        isSelected ? 'bg-blue-50' : ''
+      } ${isUpdating ? 'opacity-50' : ''}`}
+      style={{ height: VIRTUAL_ROW_HEIGHT }}
+    >
+      {/* Checkbox */}
+      <div className="flex items-center justify-center">
+        <input
+          type="checkbox"
+          checked={isSelected}
+          onChange={() => onToggleSelect(contact.id)}
+          className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+        />
+      </div>
+
+      {/* Name */}
+      <div className="truncate">
+        <div className="font-medium text-gray-900 truncate">{contact.name}</div>
+        {contact.email && (
+          <div className="text-xs text-gray-500 truncate">{contact.email}</div>
+        )}
+      </div>
+
+      {/* Phone */}
+      <div className="text-sm text-gray-600 truncate">
+        <a href={`tel:${contact.phone}`} className="hover:text-blue-600">
+          {contact.phone}
+        </a>
+      </div>
+
+      {/* Area */}
+      <div className="text-sm truncate">
+        {contact.areaName || contact.area_name ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span 
+              className="w-2 h-2 rounded-full flex-shrink-0" 
+              style={{ backgroundColor: contact.areaColor || '#6B7280' }}
+            />
+            <span className="truncate">{contact.areaName || contact.area_name}</span>
+          </span>
+        ) : (
+          <span className="text-gray-400">—</span>
+        )}
+      </div>
+
+      {/* Partner (Inline Assignable) */}
+      <div className="relative">
+        <button
+          onClick={() => setShowAssignDropdown(!showAssignDropdown)}
+          className="text-sm text-left w-full truncate hover:text-blue-600 transition-colors"
+        >
+          {contact.assignedToName || contact.assigned_to_name || (
+            <span className="text-gray-400 italic">Unassigned</span>
+          )}
+        </button>
+        {showAssignDropdown && (
+          <DropdownMenu onClose={() => setShowAssignDropdown(false)}>
+            <div className="py-1 max-h-48 overflow-y-auto">
+              <button
+                onClick={() => handleAssign(null)}
+                className="w-full px-3 py-2 text-left text-sm hover:bg-gray-100 text-gray-500"
+              >
+                Unassigned
+              </button>
+              {partners.map(p => (
+                <button
+                  key={p.id}
+                  onClick={() => handleAssign(p.id)}
+                  className={`w-full px-3 py-2 text-left text-sm hover:bg-gray-100 ${
+                    (contact.assignedTo || contact.assigned_to) === p.id ? 'bg-blue-50 text-blue-700' : ''
+                  }`}
+                >
+                  {p.name}
+                </button>
+              ))}
+            </div>
+          </DropdownMenu>
+        )}
+      </div>
+
+      {/* Status (Inline Editable) */}
+      <div className="relative">
+        <button
+          onClick={() => setShowStatusDropdown(!showStatusDropdown)}
+          className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium border transition-all hover:shadow-sm ${currentStatus.color}`}
+        >
+          <span className={`w-1.5 h-1.5 rounded-full ${currentStatus.dot}`} />
+          {currentStatus.label}
+          <svg className="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+        {showStatusDropdown && (
+          <DropdownMenu onClose={() => setShowStatusDropdown(false)}>
+            {STATUS_OPTIONS.map(status => (
+              <button
+                key={status.value}
+                onClick={() => handleStatusChange(status.value)}
+                className={`w-full px-3 py-2 text-left text-sm hover:bg-gray-100 flex items-center gap-2 ${
+                  contact.status === status.value ? 'bg-gray-50' : ''
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-full ${status.dot}`} />
+                {status.label}
+              </button>
+            ))}
+          </DropdownMenu>
+        )}
+      </div>
+
+      {/* Priority (Inline Editable) */}
+      <div className="relative">
+        <button
+          onClick={() => setShowPriorityDropdown(!showPriorityDropdown)}
+          className={`text-xs font-medium ${currentPriority.color} hover:underline`}
+        >
+          • {currentPriority.label}
+        </button>
+        {showPriorityDropdown && (
+          <DropdownMenu onClose={() => setShowPriorityDropdown(false)}>
+            {PRIORITY_OPTIONS.map(priority => (
+              <button
+                key={priority.value}
+                onClick={() => handlePriorityChange(priority.value)}
+                className={`w-full px-3 py-2 text-left text-sm hover:bg-gray-100 ${priority.color} ${
+                  contact.priority === priority.value ? 'bg-gray-50' : ''
+                }`}
+              >
+                • {priority.label}
+              </button>
+            ))}
+          </DropdownMenu>
+        )}
+      </div>
+
+      {/* Actions */}
+      <div className="flex items-center justify-center gap-1">
+        <button
+          onClick={() => onEdit(contact)}
+          className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+          title="Edit"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+          </svg>
+        </button>
+        <a
+          href={`tel:${contact.phone}`}
+          className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded transition-colors"
+          title="Call"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+          </svg>
+        </a>
+        <button
+          onClick={() => onDelete(contact)}
+          className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+          title="Delete"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+});
+
+// ===== Dropdown Menu =====
+function DropdownMenu({ children, onClose }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handleClick = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) {
+        onClose();
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [onClose]);
+
+  return (
+    <div
+      ref={ref}
+      className="absolute z-20 mt-1 bg-white rounded-lg shadow-lg border border-gray-200 min-w-[140px] py-1"
+      style={{ left: 0 }}
+    >
+      {children}
+    </div>
+  );
+}
+
+// ===== Analytics Cards =====
+const AnalyticsSection = memo(function AnalyticsSection({ stats, contacts }) {
+  const chartData = useMemo(() => {
+    const byStatus = {};
+    const byArea = {};
+    const byPartner = {};
+    
+    contacts.forEach(c => {
+      byStatus[c.status] = (byStatus[c.status] || 0) + 1;
+      const area = c.areaName || c.area_name || 'Unassigned';
+      byArea[area] = (byArea[area] || 0) + 1;
+      const partner = c.assignedToName || c.assigned_to_name || 'Unassigned';
+      byPartner[partner] = (byPartner[partner] || 0) + 1;
+    });
+    
+    return { byStatus, byArea, byPartner };
+  }, [contacts]);
+
+  const conversionRate = useMemo(() => {
+    if (contacts.length === 0) return 0;
+    const converted = contacts.filter(c => c.status === 'converted' || c.status === 'accepted').length;
+    return Math.round((converted / contacts.length) * 100);
+  }, [contacts]);
+
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+      <StatCard 
+        title="Total Contacts" 
+        value={stats.total || contacts.length} 
+        icon="👥"
+        color="bg-gradient-to-br from-blue-500 to-blue-600"
+      />
+      <StatCard 
+        title="Pending" 
+        value={chartData.byStatus.pending || 0} 
+        icon="⏳"
+        color="bg-gradient-to-br from-amber-500 to-amber-600"
+        trend={chartData.byStatus.pending > 10 ? 'high' : null}
+      />
+      <StatCard 
+        title="Accepted" 
+        value={chartData.byStatus.accepted || 0} 
+        icon="✅"
+        color="bg-gradient-to-br from-emerald-500 to-emerald-600"
+      />
+      <StatCard 
+        title="Rejected" 
+        value={chartData.byStatus.rejected || 0} 
+        icon="❌"
+        color="bg-gradient-to-br from-rose-500 to-rose-600"
+      />
+      <StatCard 
+        title="Follow Up" 
+        value={chartData.byStatus.followup || 0} 
+        icon="📞"
+        color="bg-gradient-to-br from-sky-500 to-sky-600"
+      />
+      <StatCard 
+        title="Conversion Rate" 
+        value={`${conversionRate}%`} 
+        icon="📈"
+        color="bg-gradient-to-br from-purple-500 to-purple-600"
+        isPercentage
+      />
+    </div>
+  );
+});
+
+function StatCard({ title, value, icon, color, trend, isPercentage }) {
+  return (
+    <div className={`${color} rounded-xl p-4 text-white shadow-lg`}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-2xl">{icon}</span>
+        {trend === 'high' && (
+          <span className="text-xs bg-white/20 px-2 py-0.5 rounded-full">High</span>
+        )}
+      </div>
+      <div className="text-2xl font-bold">{value}</div>
+      <div className="text-sm text-white/80">{title}</div>
+    </div>
+  );
+}
+
+// ===== Quick Filters =====
+function QuickFilters({ filters, setFilters, areas, partners, contacts }) {
+  const counts = useMemo(() => {
+    const result = { all: contacts.length };
+    STATUS_OPTIONS.forEach(s => {
+      result[s.value] = contacts.filter(c => c.status === s.value).length;
+    });
+    result.unassigned = contacts.filter(c => !c.assignedTo && !c.assigned_to).length;
+    return result;
+  }, [contacts]);
+
+  return (
+    <div className="flex flex-wrap gap-2 mb-4">
+      <button
+        onClick={() => setFilters(f => ({ ...f, status: '' }))}
+        className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+          !filters.status ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+        }`}
+      >
+        All ({counts.all})
+      </button>
+      {STATUS_OPTIONS.map(status => (
+        <button
+          key={status.value}
+          onClick={() => setFilters(f => ({ ...f, status: status.value }))}
+          className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors flex items-center gap-1.5 ${
+            filters.status === status.value
+              ? `${status.color} border`
+              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+          }`}
+        >
+          <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`} />
+          {status.label} ({counts[status.value]})
+        </button>
+      ))}
+      <button
+        onClick={() => setFilters(f => ({ ...f, unassigned: !f.unassigned }))}
+        className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+          filters.unassigned ? 'bg-orange-100 text-orange-700 border border-orange-300' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+        }`}
+      >
+        🚫 Unassigned ({counts.unassigned})
+      </button>
+    </div>
+  );
+}
+
+// ===== Main Admin Dashboard =====
 export default function AdminDashboard() {
   const { user, logout, loading: authLoading } = useAuth();
   const router = useRouter();
   const toast = useToast();
 
-  // UI State
-  const [activeTab, setActiveTab] = useState('contacts');
-  const [loading, setLoading] = useState(true);
-  const [showModal, setShowModal] = useState(null);
-  const [editItem, setEditItem] = useState(null);
-  const [confirmDialog, setConfirmDialog] = useState(null);
-  const [actionLoading, setActionLoading] = useState(false);
-
   // Data State
-  const [contacts, setContacts] = useState([]);
+  const [allContacts, setAllContacts] = useState([]);
   const [partners, setPartners] = useState([]);
   const [areas, setAreas] = useState([]);
   const [stats, setStats] = useState({});
-  const [activityLogs, setActivityLogs] = useState([]);
-  const [pagination, setPagination] = useState({ page: 1, totalPages: 1, total: 0 });
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
+
+  // UI State
+  const [activeTab, setActiveTab] = useState('contacts');
+  const [showModal, setShowModal] = useState(null);
+  const [editItem, setEditItem] = useState(null);
+  const [confirmDialog, setConfirmDialog] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
 
   // Filters
   const [filters, setFilters] = useState({
+    search: '',
     status: '',
     areaId: '',
     assignedTo: '',
-    search: '',
-    page: 1,
+    unassigned: false,
   });
-
-  // Selection for bulk actions
-  const [selectedIds, setSelectedIds] = useState([]);
+  const debouncedSearch = useDebounce(filters.search);
 
   // Auth check
   useEffect(() => {
     if (!authLoading && !user) {
       router.push('/login');
     } else if (!authLoading && user?.role !== ROLES.ADMIN) {
-    router.push('/partner');
+      router.push('/partner');
     }
   }, [user, authLoading, router]);
 
-  // Fetch contacts
-  const fetchContacts = useCallback(async () => {
+  // Fetch ALL contacts (no pagination)
+  const fetchAllData = useCallback(async () => {
     if (!user) return;
     try {
       setLoading(true);
-      const params = {};
-      if (filters.status) params.status = filters.status;
-      if (filters.areaId) params.areaId = filters.areaId;
-      if (filters.assignedTo) params.assignedTo = filters.assignedTo;
-      if (filters.search) params.search = filters.search;
-      params.page = filters.page;
-      params.limit = 20;
-
-      const response = await contactsApi.getAll(params);
-      
-      // Handle both paginated and array responses
-      if (response?.data) {
-        setContacts(response.data);
-        setPagination(response.pagination || { page: 1, totalPages: 1, total: response.data.length });
-      } else if (Array.isArray(response)) {
-        setContacts(response);
-        setPagination({ page: 1, totalPages: 1, total: response.length });
-      }
-    } catch (error) {
-      toast.error('Failed to fetch contacts');
-      console.error(error);
-    } finally {
-      setLoading(false);
-    }
-  }, [filters, user, toast]);
-
-  // Fetch supporting data
-  const fetchSupportingData = useCallback(async () => {
-    if (!user) return;
-    try {
-      const [workersRes, areasRes, statsRes] = await Promise.all([
+      const [contactsRes, workersRes, areasRes, statsRes] = await Promise.all([
+        contactsApi.getAll({ limit: 10000 }), // Get all contacts
         usersApi.getAll().catch(() => []),
         areasApi.getAll().catch(() => []),
         contactsApi.getStats().catch(() => ({})),
       ]);
 
+      const contactsData = contactsRes?.data || contactsRes || [];
+      setAllContacts(Array.isArray(contactsData) ? contactsData : []);
       setPartners(Array.isArray(workersRes) ? workersRes : workersRes?.data || []);
       setAreas(Array.isArray(areasRes) ? areasRes : areasRes?.data || []);
       setStats(statsRes?.data || statsRes || {});
     } catch (error) {
-      console.error('Failed to fetch supporting data:', error);
+      toast.error('Failed to fetch data');
+      console.error(error);
+    } finally {
+      setLoading(false);
     }
-  }, [user]);
+  }, [user, toast]);
 
-  // Initial load
   useEffect(() => {
     if (user?.role === ROLES.ADMIN) {
-      fetchContacts();
-      fetchSupportingData();
+      fetchAllData();
     }
-  }, [fetchContacts, fetchSupportingData, user]);
+  }, [fetchAllData, user]);
 
-  // Handlers
-  const handleCreateContact = async (e) => {
-    e.preventDefault();
-    setActionLoading(true);
-    
-    const formData = new FormData(e.target);
-    const data = {
-      name: formData.get('name'),
-      phone: formData.get('phone'),
-      email: formData.get('email') || null,
-      address: formData.get('address') || null,
-      areaId: formData.get('areaId') || null,
-      assignedTo: formData.get('assignedTo') || null,
-      priority: formData.get('priority') || PRIORITY.MEDIUM,
-      notes: formData.get('notes') || '',
-    };
+  // Filtered contacts (client-side filtering for instant response)
+  const filteredContacts = useMemo(() => {
+    let result = [...allContacts];
 
+    // Search filter
+    if (debouncedSearch) {
+      const search = debouncedSearch.toLowerCase();
+      result = result.filter(c =>
+        c.name?.toLowerCase().includes(search) ||
+        c.phone?.includes(search) ||
+        c.email?.toLowerCase().includes(search) ||
+        c.address?.toLowerCase().includes(search)
+      );
+    }
+
+    // Status filter
+    if (filters.status) {
+      result = result.filter(c => c.status === filters.status);
+    }
+
+    // Area filter
+    if (filters.areaId) {
+      result = result.filter(c => (c.areaId || c.area_id) === filters.areaId);
+    }
+
+    // Partner filter
+    if (filters.assignedTo) {
+      result = result.filter(c => (c.assignedTo || c.assigned_to) === filters.assignedTo);
+    }
+
+    // Unassigned filter
+    if (filters.unassigned) {
+      result = result.filter(c => !c.assignedTo && !c.assigned_to);
+    }
+
+    return result;
+  }, [allContacts, debouncedSearch, filters]);
+
+  // ===== Handlers =====
+  const handleInlineStatusChange = async (contactId, newStatus) => {
     try {
-      await contactsApi.create(data);
-      toast.success('Contact created successfully');
-      setShowModal(null);
-      fetchContacts();
-      fetchSupportingData();
+      await contactsApi.update(contactId, { status: newStatus });
+      setAllContacts(prev => prev.map(c => 
+        c.id === contactId ? { ...c, status: newStatus } : c
+      ));
+      toast.success('Status updated');
     } catch (error) {
-      toast.error(error.message || 'Failed to create contact');
-    } finally {
-      setActionLoading(false);
+      toast.error('Failed to update status');
     }
   };
 
-  const handleUpdateContact = async (e) => {
-    e.preventDefault();
-    setActionLoading(true);
-    
-    const formData = new FormData(e.target);
-    const data = {
-      name: formData.get('name'),
-      phone: formData.get('phone'),
-      email: formData.get('email') || null,
-      address: formData.get('address') || null,
-      areaId: formData.get('areaId') || null,
-      assignedTo: formData.get('assignedTo') || null,
-      status: formData.get('status'),
-      priority: formData.get('priority'),
-      notes: formData.get('notes') || '',
-    };
-
+  const handleInlinePriorityChange = async (contactId, newPriority) => {
     try {
-      await contactsApi.update(editItem.id, data);
-      toast.success('Contact updated successfully');
-      setShowModal(null);
-      setEditItem(null);
-      fetchContacts();
+      await contactsApi.update(contactId, { priority: newPriority });
+      setAllContacts(prev => prev.map(c => 
+        c.id === contactId ? { ...c, priority: newPriority } : c
+      ));
+      toast.success('Priority updated');
     } catch (error) {
-      toast.error(error.message || 'Failed to update contact');
-    } finally {
-      setActionLoading(false);
+      toast.error('Failed to update priority');
+    }
+  };
+
+  const handleInlineAssign = async (contactId, partnerId) => {
+    try {
+      await contactsApi.update(contactId, { assignedTo: partnerId });
+      const partner = partners.find(p => p.id === partnerId);
+      setAllContacts(prev => prev.map(c => 
+        c.id === contactId ? { 
+          ...c, 
+          assignedTo: partnerId, 
+          assigned_to: partnerId,
+          assignedToName: partner?.name || null,
+          assigned_to_name: partner?.name || null,
+        } : c
+      ));
+      toast.success(partnerId ? 'Contact assigned' : 'Contact unassigned');
+    } catch (error) {
+      toast.error('Failed to assign contact');
     }
   };
 
   const handleDeleteContact = async (contact) => {
     setConfirmDialog({
       title: 'Delete Contact',
-      message: `Are you sure you want to delete "${contact.name}"? This action cannot be undone.`,
+      message: `Delete "${contact.name}"? This cannot be undone.`,
       onConfirm: async () => {
         setActionLoading(true);
         try {
           await contactsApi.delete(contact.id);
+          setAllContacts(prev => prev.filter(c => c.id !== contact.id));
           toast.success('Contact deleted');
-          fetchContacts();
-          fetchSupportingData();
         } catch (error) {
-          toast.error(error.message || 'Failed to delete contact');
+          toast.error('Failed to delete contact');
         } finally {
           setActionLoading(false);
           setConfirmDialog(null);
@@ -201,20 +681,18 @@ export default function AdminDashboard() {
 
   const handleBulkDelete = async () => {
     if (selectedIds.length === 0) return;
-    
     setConfirmDialog({
-      title: 'Delete Selected Contacts',
-      message: `Are you sure you want to delete ${selectedIds.length} contact(s)? This action cannot be undone.`,
+      title: 'Delete Selected',
+      message: `Delete ${selectedIds.length} contacts? This cannot be undone.`,
       onConfirm: async () => {
         setActionLoading(true);
         try {
           await contactsApi.bulkDelete(selectedIds);
-          toast.success(`Deleted ${selectedIds.length} contacts`);
+          setAllContacts(prev => prev.filter(c => !selectedIds.includes(c.id)));
           setSelectedIds([]);
-          fetchContacts();
-          fetchSupportingData();
+          toast.success(`Deleted ${selectedIds.length} contacts`);
         } catch (error) {
-          toast.error(error.message || 'Failed to delete contacts');
+          toast.error('Failed to delete contacts');
         } finally {
           setActionLoading(false);
           setConfirmDialog(null);
@@ -223,42 +701,26 @@ export default function AdminDashboard() {
     });
   };
 
-  const handleBulkAssign = async (e) => {
-    e.preventDefault();
-    const formData = new FormData(e.target);
-    const assignedTo = formData.get('assignedTo');
-    
-    if (!assignedTo || selectedIds.length === 0) return;
-    
+  const handleBulkAssign = async (partnerId) => {
+    if (selectedIds.length === 0) return;
     setActionLoading(true);
     try {
-      await contactsApi.bulkAssign(selectedIds, assignedTo);
-      toast.success(`Assigned ${selectedIds.length} contacts`);
+      await contactsApi.bulkAssign(selectedIds, partnerId);
+      const partner = partners.find(p => p.id === partnerId);
+      setAllContacts(prev => prev.map(c => 
+        selectedIds.includes(c.id) ? { 
+          ...c, 
+          assignedTo: partnerId,
+          assigned_to: partnerId,
+          assignedToName: partner?.name || null,
+          assigned_to_name: partner?.name || null,
+        } : c
+      ));
       setSelectedIds([]);
       setShowModal(null);
-      fetchContacts();
+      toast.success(`Assigned ${selectedIds.length} contacts`);
     } catch (error) {
-      toast.error(error.message || 'Failed to assign contacts');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleCountryAssign = async (countryCode, assignedTo, areaId = null) => {
-    setActionLoading(true);
-    try {
-      let result;
-      if (countryCode) {
-        result = await contactsApi.bulkAssignByCountry(countryCode, assignedTo);
-        toast.success(`Assigned ${result.updated} contacts from ${countryCode}`);
-      } else if (areaId) {
-        result = await contactsApi.bulkAssignByArea(areaId, assignedTo);
-        toast.success(`Assigned ${result.updated} contacts from area`);
-      }
-      setShowModal(null);
-      fetchContacts();
-    } catch (error) {
-      toast.error(error.message || 'Failed to assign contacts');
+      toast.error('Failed to assign contacts');
     } finally {
       setActionLoading(false);
     }
@@ -266,10 +728,9 @@ export default function AdminDashboard() {
 
   const handleExport = async () => {
     try {
-      const params = {};
+      const params = { format: 'csv', limit: 10000 };
       if (filters.status) params.status = filters.status;
       if (filters.areaId) params.areaId = filters.areaId;
-      params.format = 'csv';
       
       const response = await contactsApi.export(params);
       
@@ -283,191 +744,13 @@ export default function AdminDashboard() {
         a.click();
         window.URL.revokeObjectURL(url);
         document.body.removeChild(a);
-        toast.success('Contacts exported');
+        toast.success('Exported successfully');
       }
     } catch (error) {
-      toast.error('Failed to export contacts');
+      toast.error('Export failed');
     }
   };
 
-  // New handleImportFile using the enhanced import API
-  const handleImportFile = async (file, options) => {
-    setActionLoading(true);
-    try {
-      const result = await contactsApi.importFile(file, options);
-      setShowModal(null);
-      fetchContacts();
-      fetchSupportingData();
-      return result;
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  // Legacy handleImport for backwards compatibility
-  const handleImport = async (e) => {
-    e.preventDefault();
-    const formData = new FormData(e.target);
-    const file = formData.get('file');
-    
-    if (!file) {
-      toast.error('Please select a file');
-      return;
-    }
-
-    setActionLoading(true);
-    try {
-      const text = await file.text();
-      const lines = text.trim().split('\n');
-      const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-      
-      const contacts = lines.slice(1).map(line => {
-        const values = line.split(',');
-        const contact = {};
-        headers.forEach((header, index) => {
-          contact[header] = values[index]?.trim() || '';
-        });
-        return contact;
-      }).filter(c => c.name && c.phone);
-
-      if (contacts.length === 0) {
-        toast.error('No valid contacts found in file');
-        return;
-      }
-
-      await contactsApi.import({ contacts, areaId: formData.get('areaId') || null });
-      toast.success(`Imported ${contacts.length} contacts`);
-      setShowModal(null);
-      fetchContacts();
-      fetchSupportingData();
-    } catch (error) {
-      toast.error(error.message || 'Failed to import contacts');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  // Partner handlers
-  const handleCreatePartner = async (e) => {
-    e.preventDefault();
-    setActionLoading(true);
-    
-    const formData = new FormData(e.target);
-    const selectedAreas = Array.from(formData.getAll('areaIds'));
-    
-    const data = {
-      username: formData.get('username'),
-      password: formData.get('password'),
-      name: formData.get('name'),
-      role: ROLES.PARTNER,
-      areaIds: selectedAreas,
-    };
-
-    try {
-      await usersApi.create(data);
-      toast.success('Partner created successfully');
-      setShowModal(null);
-      fetchSupportingData();
-    } catch (error) {
-      toast.error(error.message || 'Failed to create partner');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleUpdatePartner = async (e) => {
-    e.preventDefault();
-    setActionLoading(true);
-    
-    const formData = new FormData(e.target);
-    const selectedAreas = Array.from(formData.getAll('areaIds'));
-    
-    const data = {
-      name: formData.get('name'),
-      areaIds: selectedAreas,
-    };
-    
-    const password = formData.get('password');
-    if (password) data.password = password;
-
-    try {
-      await usersApi.update(editItem.id, data);
-      toast.success('Partner updated successfully');
-      setShowModal(null);
-      setEditItem(null);
-      fetchSupportingData();
-    } catch (error) {
-      toast.error(error.message || 'Failed to update partner');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleDeletePartner = async (partner) => {
-    setConfirmDialog({
-      title: 'Delete Partner',
-      message: `Are you sure you want to delete "${partner.name}"?`,
-      onConfirm: async () => {
-        setActionLoading(true);
-        try {
-          await usersApi.delete(partner.id);
-          toast.success('Partner deleted');
-          fetchSupportingData();
-        } catch (error) {
-          toast.error(error.message || 'Failed to delete partner');
-        } finally {
-          setActionLoading(false);
-          setConfirmDialog(null);
-        }
-      },
-    });
-  };
-
-  // Area handlers
-  const handleCreateArea = async (e) => {
-    e.preventDefault();
-    setActionLoading(true);
-    
-    const formData = new FormData(e.target);
-    const data = {
-      name: formData.get('name'),
-      description: formData.get('description') || '',
-      color: formData.get('color') || '#3B82F6',
-    };
-
-    try {
-      await areasApi.create(data);
-      toast.success('Area created successfully');
-      setShowModal(null);
-      fetchSupportingData();
-    } catch (error) {
-      toast.error(error.message || 'Failed to create area');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleDeleteArea = async (area) => {
-    setConfirmDialog({
-      title: 'Delete Area',
-      message: `Are you sure you want to delete "${area.name}"? This may affect assigned contacts.`,
-      onConfirm: async () => {
-        setActionLoading(true);
-        try {
-          await areasApi.delete(area.id);
-          toast.success('Area deleted');
-          fetchSupportingData();
-        } catch (error) {
-          toast.error(error.message || 'Failed to delete area');
-        } finally {
-          setActionLoading(false);
-          setConfirmDialog(null);
-        }
-      },
-    });
-  };
-
-  // Toggle selection
   const toggleSelection = (id) => {
     setSelectedIds(prev => 
       prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
@@ -475,18 +758,18 @@ export default function AdminDashboard() {
   };
 
   const toggleSelectAll = () => {
-    if (selectedIds.length === contacts.length) {
+    if (selectedIds.length === filteredContacts.length) {
       setSelectedIds([]);
     } else {
-      setSelectedIds(contacts.map(c => c.id));
+      setSelectedIds(filteredContacts.map(c => c.id));
     }
   };
 
   // Loading state
   if (authLoading || !user) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <Spinner size="lg" className="text-blue-600" />
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
       </div>
     );
   }
@@ -494,61 +777,62 @@ export default function AdminDashboard() {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <header className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+      <header className="bg-white border-b border-gray-200 sticky top-0 z-30">
+        <div className="max-w-[1600px] mx-auto px-4 md:px-6 py-3">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-2xl font-bold text-gray-900">Admin Dashboard</h1>
-              <p className="text-sm text-gray-500">Welcome back, {user.name}</p>
+              <h1 className="text-xl font-bold text-gray-900">Welcome back, {user.name}</h1>
+              <p className="text-sm text-gray-500">{filteredContacts.length} contacts • Last updated: {new Date().toLocaleTimeString()}</p>
             </div>
-            <div className="flex items-center gap-4">
-              <Button variant="outline" onClick={handleExport} icon={
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => fetchAllData()}
+                className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg"
+                title="Refresh"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+              <button
+                onClick={handleExport}
+                className="px-3 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded-lg font-medium flex items-center gap-2"
+              >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                 </svg>
-              }>
                 Export
-              </Button>
-              <Button variant="outline" onClick={() => setShowModal('changePassword')} icon={
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-                </svg>
-              }>
+              </button>
+              <button
+                onClick={() => setShowModal('changePassword')}
+                className="px-3 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded-lg font-medium"
+              >
                 Change Password
-              </Button>
-              <Button variant="ghost" onClick={logout}>Logout</Button>
+              </button>
+              <button
+                onClick={logout}
+                className="px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg font-medium"
+              >
+                Logout
+              </button>
             </div>
           </div>
         </div>
       </header>
 
-      {/* Stats Cards */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-6">
-          <StatCard 
-            title="Total" 
-            value={stats.total || 0} 
-            color="blue"
-            icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>}
-          />
-          {Object.entries(STATUS_CONFIG).slice(0, 5).map(([status, config]) => (
-            <StatCard
-              key={status}
-              title={config.label}
-              value={stats.byStatus?.[status] || 0}
-              color={status === 'accepted' ? 'green' : status === 'rejected' ? 'red' : status === 'pending' ? 'yellow' : 'purple'}
-              icon={<span className="text-lg">{config.icon}</span>}
-            />
-          ))}
-        </div>
+      <main className="max-w-[1600px] mx-auto px-4 md:px-6 py-6">
+        {/* Analytics */}
+        <AnalyticsSection stats={stats} contacts={allContacts} />
 
         {/* Tabs */}
-        <div className="tabs mb-6">
-          {['contacts', 'partners', 'areas', 'activity'].map(tab => (
+        <div className="flex gap-1 mb-4 bg-gray-100 rounded-lg p-1 w-fit">
+          {['contacts', 'partners', 'areas'].map(tab => (
             <button
               key={tab}
-              className={`tab ${activeTab === tab ? 'active' : ''}`}
               onClick={() => setActiveTab(tab)}
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                activeTab === tab ? 'bg-white shadow text-gray-900' : 'text-gray-600 hover:text-gray-900'
+              }`}
             >
               {tab.charAt(0).toUpperCase() + tab.slice(1)}
             </button>
@@ -557,330 +841,250 @@ export default function AdminDashboard() {
 
         {/* Contacts Tab */}
         {activeTab === 'contacts' && (
-          <div className="space-y-4">
-            {/* Filters and Actions */}
-            <div className="flex flex-wrap items-center gap-4 bg-white p-4 rounded-xl shadow-sm">
-              <SearchInput
-                value={filters.search}
-                onChange={(value) => setFilters(prev => ({ ...prev, search: value, page: 1 }))}
-                placeholder="Search contacts..."
-                className="w-64"
-              />
-              <Select
-                value={filters.status}
-                onChange={(value) => setFilters(prev => ({ ...prev, status: value, page: 1 }))}
-                placeholder="All Statuses"
-                options={Object.entries(STATUS_CONFIG).map(([value, config]) => ({ value, label: config.label }))}
-                className="w-40"
-              />
-              <Select
-                value={filters.areaId}
-                onChange={(value) => setFilters(prev => ({ ...prev, areaId: value, page: 1 }))}
-                placeholder="All Areas"
-                options={areas.map(a => ({ value: a.id || a._id, label: a.name }))}
-                className="w-40"
-              />
-              <Select
-                value={filters.assignedTo}
-                onChange={(value) => setFilters(prev => ({ ...prev, assignedTo: value, page: 1 }))}
-                placeholder="All Partners"
-                options={partners.filter(w => w.role === 'partner').map(w => ({ value: w.id || w._id, label: w.name }))}
-                className="w-40"
-              />
-              
-              <div className="flex-1"></div>
-              
-              {selectedIds.length > 0 && (
-                <>
-                  <Button variant="outline" onClick={() => setShowModal('bulkAssign')}>
-                    Assign ({selectedIds.length})
-                  </Button>
-                  <Button variant="danger" onClick={handleBulkDelete}>
-                    Delete ({selectedIds.length})
-                  </Button>
-                </>
-              )}
-              <Button onClick={() => setShowModal('import')} variant="outline">Import</Button>
-              <Button onClick={() => setShowModal('recategorize')} variant="outline">🌍 Categorize</Button>
-              <Button onClick={() => setShowModal('addContact')}>Add Contact</Button>
-            </div>
+          <>
+            {/* Quick Status Filters */}
+            <QuickFilters 
+              filters={filters} 
+              setFilters={setFilters} 
+              areas={areas} 
+              partners={partners}
+              contacts={allContacts}
+            />
 
-            {/* Contacts Table */}
-            {loading ? (
-              <div className="flex justify-center py-12">
-                <Spinner size="lg" className="text-blue-600" />
-              </div>
-            ) : contacts.length === 0 ? (
-              <EmptyState
-                title="No contacts found"
-                description="Add your first contact or adjust the filters"
-                icon={<svg className="w-16 h-16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>}
-                action={<Button onClick={() => setShowModal('addContact')}>Add Contact</Button>}
-              />
-            ) : (
-              <div className="data-table">
-                <table className="w-full">
-                  <thead>
-                    <tr>
-                      <th className="w-8">
-                        <input
-                          type="checkbox"
-                          checked={selectedIds.length === contacts.length && contacts.length > 0}
-                          onChange={toggleSelectAll}
-                          className="rounded"
-                        />
-                      </th>
-                      <th>Name</th>
-                      <th>Phone</th>
-                      <th>Area</th>
-                      <th>Assigned To</th>
-                      <th>Status</th>
-                      <th>Priority</th>
-                      <th className="w-24">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {contacts.map(contact => (
-                      <tr key={contact.id}>
-                        <td>
-                          <input
-                            type="checkbox"
-                            checked={selectedIds.includes(contact.id)}
-                            onChange={() => toggleSelection(contact.id)}
-                            className="rounded"
-                          />
-                        </td>
-                        <td>
-                          <div className="font-medium">{contact.name}</div>
-                          {contact.email && <div className="text-xs text-gray-500">{contact.email}</div>}
-                        </td>
-                        <td>{contact.phone}</td>
-                        <td>
-                          {contact.area_name || contact.areaName ? (
-                            <span className="inline-flex items-center gap-1">
-                              {contact.areaColor && (
-                                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: contact.areaColor }}></span>
-                              )}
-                              {contact.area_name || contact.areaName}
-                            </span>
-                          ) : (
-                            <span className="text-gray-400">-</span>
-                          )}
-                        </td>
-                        <td>{contact.assigned_to_name || contact.assignedToName || <span className="text-gray-400">Unassigned</span>}</td>
-                        <td><StatusBadge status={contact.status} size="sm" /></td>
-                        <td>{contact.priority && <PriorityBadge priority={contact.priority} size="sm" />}</td>
-                        <td>
-                          <div className="flex items-center gap-1">
-                            <button
-                              onClick={() => { setEditItem(contact); setShowModal('editContact'); }}
-                              className="p-1 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded"
-                              title="Edit"
-                            >
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                              </svg>
-                            </button>
-                            <button
-                              onClick={() => handleDeleteContact(contact)}
-                              className="p-1 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded"
-                              title="Delete"
-                            >
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                              </svg>
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {/* Pagination */}
-            {pagination.totalPages > 1 && (
-              <div className="mt-4">
-                <Pagination
-                  currentPage={filters.page}
-                  totalPages={pagination.totalPages}
-                  onPageChange={(page) => setFilters(prev => ({ ...prev, page }))}
+            {/* Search and Actions Bar */}
+            <div className="flex flex-wrap items-center gap-3 mb-4">
+              <div className="relative flex-1 min-w-[200px] max-w-md">
+                <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                <input
+                  type="text"
+                  value={filters.search}
+                  onChange={(e) => setFilters(f => ({ ...f, search: e.target.value }))}
+                  placeholder="Search contacts..."
+                  className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
                 />
               </div>
+
+              <select
+                value={filters.areaId}
+                onChange={(e) => setFilters(f => ({ ...f, areaId: e.target.value }))}
+                className="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">All Areas</option>
+                {areas.map(a => (
+                  <option key={a.id} value={a.id}>{a.name}</option>
+                ))}
+              </select>
+
+              <select
+                value={filters.assignedTo}
+                onChange={(e) => setFilters(f => ({ ...f, assignedTo: e.target.value }))}
+                className="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">All Partners</option>
+                {partners.filter(p => p.role === 'partner').map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+
+              <div className="flex-1" />
+
+              {selectedIds.length > 0 && (
+                <div className="flex items-center gap-2 bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-200">
+                  <span className="text-sm font-medium text-blue-700">{selectedIds.length} selected</span>
+                  <button
+                    onClick={() => setShowModal('bulkAssign')}
+                    className="text-sm text-blue-600 hover:underline"
+                  >
+                    Assign
+                  </button>
+                  <button
+                    onClick={handleBulkDelete}
+                    className="text-sm text-red-600 hover:underline"
+                  >
+                    Delete
+                  </button>
+                  <button
+                    onClick={() => setSelectedIds([])}
+                    className="text-sm text-gray-500 hover:underline"
+                  >
+                    Clear
+                  </button>
+                </div>
+              )}
+
+              <button
+                onClick={() => setShowModal('import')}
+                className="px-4 py-2 text-sm border border-gray-200 hover:bg-gray-50 rounded-lg font-medium"
+              >
+                Import
+              </button>
+              <button
+                onClick={() => setShowModal('addContact')}
+                className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
+              >
+                + Add Contact
+              </button>
+            </div>
+
+            {/* Contacts Table with Virtual Scrolling */}
+            {loading ? (
+              <div className="flex items-center justify-center h-96">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+              </div>
+            ) : filteredContacts.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-96 bg-white rounded-xl border border-gray-200">
+                <div className="text-6xl mb-4">📭</div>
+                <h3 className="text-lg font-medium text-gray-900 mb-1">No contacts found</h3>
+                <p className="text-gray-500 mb-4">Try adjusting your filters or add a new contact</p>
+                <button
+                  onClick={() => setShowModal('addContact')}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium"
+                >
+                  Add Contact
+                </button>
+              </div>
+            ) : (
+              <VirtualContactList
+                contacts={filteredContacts}
+                selectedIds={selectedIds}
+                onToggleSelect={toggleSelection}
+                onSelectAll={toggleSelectAll}
+                onStatusChange={handleInlineStatusChange}
+                onPriorityChange={handleInlinePriorityChange}
+                onEdit={(contact) => { setEditItem(contact); setShowModal('editContact'); }}
+                onDelete={handleDeleteContact}
+                onAssign={handleInlineAssign}
+                partners={partners.filter(p => p.role === 'partner')}
+              />
             )}
-          </div>
+          </>
         )}
 
         {/* Partners Tab */}
         {activeTab === 'partners' && (
-          <div className="space-y-4">
-            <div className="flex justify-end">
-              <Button onClick={() => setShowModal('addPartner')}>Add Partner</Button>
-            </div>
-            
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {partners.filter(w => w.role === 'partner').map(partner => (
-                <div key={partner.id || partner._id} className="card">
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <h3 className="font-semibold text-gray-900">{partner.name}</h3>
-                      <p className="text-sm text-gray-500">@{partner.username}</p>
-                    </div>
-                    <div className="flex gap-1">
-                      <button
-                        onClick={() => { setEditItem(partner); setShowModal('editPartner'); }}
-                        className="p-1 text-gray-500 hover:text-blue-600"
-                        title="Edit partner"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                        </svg>
-                      </button>
-                      <button
-                        onClick={() => { setEditItem(partner); setShowModal('changePassword'); }}
-                        className="p-1 text-gray-500 hover:text-yellow-600"
-                        title="Reset password"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-                        </svg>
-                      </button>
-                      <button
-                        onClick={() => handleDeletePartner(partner)}
-                        className="p-1 text-gray-500 hover:text-red-600"
-                        title="Delete partner"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
-                    </div>
-                  </div>
-                  <div className="mt-3">
-                    <p className="text-xs text-gray-500 mb-1">Assigned Areas:</p>
-                    <div className="flex flex-wrap gap-1">
-                      {partner.areas?.length > 0 ? (
-                        partner.areas.map((area, idx) => (
-                          <span key={idx} className="badge badge-blue text-xs">
-                            {area.name || area}
-                          </span>
-                        ))
-                      ) : (
-                        <span className="text-gray-400 text-sm">No areas assigned</span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+          <PartnersTab 
+            partners={partners} 
+            areas={areas}
+            onAdd={() => setShowModal('addPartner')}
+            onEdit={(p) => { setEditItem(p); setShowModal('editPartner'); }}
+            onDelete={(p) => {
+              setConfirmDialog({
+                title: 'Delete Partner',
+                message: `Delete "${p.name}"?`,
+                onConfirm: async () => {
+                  try {
+                    await usersApi.delete(p.id);
+                    setPartners(prev => prev.filter(x => x.id !== p.id));
+                    toast.success('Partner deleted');
+                  } catch (e) {
+                    toast.error('Failed to delete');
+                  }
+                  setConfirmDialog(null);
+                }
+              });
+            }}
+          />
         )}
 
         {/* Areas Tab */}
         {activeTab === 'areas' && (
-          <div className="space-y-4">
-            <div className="flex justify-end">
-              <Button onClick={() => setShowModal('addArea')}>Add Area</Button>
-            </div>
-            
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {areas.map(area => (
-                <div key={area.id || area._id} className="card">
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-center gap-2">
-                      <span 
-                        className="w-4 h-4 rounded-full" 
-                        style={{ backgroundColor: area.color || '#3B82F6' }}
-                      ></span>
-                      <h3 className="font-semibold text-gray-900">{area.name}</h3>
-                    </div>
-                    <button
-                      onClick={() => handleDeleteArea(area)}
-                      className="p-1 text-gray-500 hover:text-red-600"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </button>
-                  </div>
-                  {area.description && (
-                    <p className="text-sm text-gray-500 mt-2">{area.description}</p>
-                  )}
-                  <div className="mt-3 flex gap-4 text-sm">
-                    <span className="text-gray-500">
-                      <strong className="text-gray-700">{area.contactCount || 0}</strong> contacts
-                    </span>
-                    <span className="text-gray-500">
-                      <strong className="text-gray-700">{area.partnerCount || area.workerCount || 0}</strong> partners
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+          <AreasTab 
+            areas={areas}
+            contacts={allContacts}
+            onAdd={() => setShowModal('addArea')}
+            onDelete={(a) => {
+              setConfirmDialog({
+                title: 'Delete Area',
+                message: `Delete "${a.name}"?`,
+                onConfirm: async () => {
+                  try {
+                    await areasApi.delete(a.id);
+                    setAreas(prev => prev.filter(x => x.id !== a.id));
+                    toast.success('Area deleted');
+                  } catch (e) {
+                    toast.error('Failed to delete');
+                  }
+                  setConfirmDialog(null);
+                }
+              });
+            }}
+          />
         )}
-
-        {/* Activity Tab */}
-        {activeTab === 'activity' && (
-          <div className="card">
-            <h3 className="font-semibold mb-4">Recent Activity</h3>
-            <p className="text-gray-500 text-sm">Activity logging coming soon...</p>
-          </div>
-        )}
-      </div>
+      </main>
 
       {/* Modals */}
+      <BulkAssignModal
+        isOpen={showModal === 'bulkAssign'}
+        onClose={() => setShowModal(null)}
+        partners={partners.filter(p => p.role === 'partner')}
+        selectedCount={selectedIds.length}
+        onAssign={handleBulkAssign}
+        loading={actionLoading}
+      />
+
       <ContactFormModal
         isOpen={showModal === 'addContact' || showModal === 'editContact'}
         onClose={() => { setShowModal(null); setEditItem(null); }}
-        onSubmit={showModal === 'editContact' ? handleUpdateContact : handleCreateContact}
         contact={editItem}
         areas={areas}
         partners={partners}
-        loading={actionLoading}
+        onSuccess={(contact) => {
+          if (editItem) {
+            setAllContacts(prev => prev.map(c => c.id === contact.id ? contact : c));
+          } else {
+            setAllContacts(prev => [contact, ...prev]);
+          }
+          setShowModal(null);
+          setEditItem(null);
+        }}
+        toast={toast}
       />
 
       <PartnerFormModal
         isOpen={showModal === 'addPartner' || showModal === 'editPartner'}
         onClose={() => { setShowModal(null); setEditItem(null); }}
-        onSubmit={showModal === 'editPartner' ? handleUpdatePartner : handleCreatePartner}
         partner={editItem}
         areas={areas}
-        loading={actionLoading}
+        onSuccess={(partner) => {
+          if (editItem) {
+            setPartners(prev => prev.map(p => p.id === partner.id ? partner : p));
+          } else {
+            setPartners(prev => [...prev, partner]);
+          }
+          fetchAllData(); // Refresh to get full data
+          setShowModal(null);
+          setEditItem(null);
+        }}
+        toast={toast}
       />
 
       <AreaFormModal
         isOpen={showModal === 'addArea'}
         onClose={() => setShowModal(null)}
-        onSubmit={handleCreateArea}
-        loading={actionLoading}
+        onSuccess={(area) => {
+          setAreas(prev => [...prev, area]);
+          setShowModal(null);
+        }}
+        toast={toast}
       />
 
       <ImportModal
         isOpen={showModal === 'import'}
         onClose={() => setShowModal(null)}
-        onImport={handleImportFile}
         areas={areas}
-        loading={actionLoading}
+        onSuccess={() => {
+          fetchAllData();
+          setShowModal(null);
+        }}
         toast={toast}
       />
 
-      <BulkAssignModal
-        isOpen={showModal === 'bulkAssign'}
-        onClose={() => setShowModal(null)}
-        onSubmit={handleBulkAssign}
-        onCountryAssign={handleCountryAssign}
-        partners={partners}
-        areas={areas}
-        selectedCount={selectedIds.length}
-        loading={actionLoading}
-      />
-
-      <RecategorizeModal
-        isOpen={showModal === 'recategorize'}
-        onClose={() => setShowModal(null)}
-        onComplete={() => { fetchContacts(); fetchSupportingData(); }}
+      <ChangePasswordModal
+        isOpen={showModal === 'changePassword'}
+        onClose={() => { setShowModal(null); setEditItem(null); }}
+        user={editItem || user}
         toast={toast}
       />
 
@@ -892,1136 +1096,580 @@ export default function AdminDashboard() {
         message={confirmDialog?.message}
         isLoading={actionLoading}
       />
-
-      {/* Change Password Modal */}
-      <ChangePasswordModal
-        isOpen={showModal === 'changePassword'}
-        onClose={() => { setShowModal(null); setEditItem(null); }}
-        user={editItem || user}
-        isOwnPassword={!editItem || editItem.id === user.id}
-        loading={actionLoading}
-        onSubmit={async (data) => {
-          setActionLoading(true);
-          try {
-            await authApi.changePassword(data);
-            toast.success(data.userId ? 'Password changed successfully' : 'Your password has been changed');
-            setShowModal(null);
-            setEditItem(null);
-          } catch (error) {
-            toast.error(error.message || 'Failed to change password');
-          } finally {
-            setActionLoading(false);
-          }
-        }}
-      />
     </div>
   );
 }
 
-// Contact Form Modal Component
-function ContactFormModal({ isOpen, onClose, onSubmit, contact, areas, partners, loading }) {
-  const isEdit = !!contact;
+// ===== Partners Tab =====
+function PartnersTab({ partners, areas, onAdd, onEdit, onDelete }) {
+  const partnerList = partners.filter(p => p.role === 'partner');
   
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title={isEdit ? 'Edit Contact' : 'Add Contact'} size="lg">
-      <form onSubmit={onSubmit} className="space-y-4">
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
-            <input
-              type="text"
-              name="name"
-              defaultValue={contact?.name}
-              required
-              className="input"
-              placeholder="Contact name"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Phone *</label>
-            <input
-              type="tel"
-              name="phone"
-              defaultValue={contact?.phone}
-              required
-              className="input"
-              placeholder="+1 234 567 890"
-            />
-          </div>
-        </div>
-        
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-            <input
-              type="email"
-              name="email"
-              defaultValue={contact?.email}
-              className="input"
-              placeholder="email@example.com"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Area</label>
-            <select name="areaId" defaultValue={contact?.areaId || contact?.area_id || ''} className="select">
-              <option value="">Select Area</option>
-              {areas.map(a => (
-                <option key={a.id || a._id} value={a.id || a._id}>{a.name}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
-          <input
-            type="text"
-            name="address"
-            defaultValue={contact?.address}
-            className="input"
-            placeholder="Full address"
-          />
-        </div>
-
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Assign To</label>
-            <select name="assignedTo" defaultValue={contact?.assignedTo || contact?.assigned_to || ''} className="select">
-              <option value="">Unassigned</option>
-              {partners.filter(w => w.role === 'partner').map(w => (
-                <option key={w.id || w._id} value={w.id || w._id}>{w.name}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Priority</label>
-            <select name="priority" defaultValue={contact?.priority || 'medium'} className="select">
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
-              <option value="urgent">Urgent</option>
-            </select>
-          </div>
-        </div>
-
-        {isEdit && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
-            <select name="status" defaultValue={contact?.status} className="select">
-              {Object.entries(STATUS_CONFIG).map(([value, config]) => (
-                <option key={value} value={value}>{config.label}</option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
-          <textarea
-            name="notes"
-            defaultValue={contact?.notes}
-            className="input"
-            rows={3}
-            placeholder="Additional notes..."
-          />
-        </div>
-
-        <div className="flex justify-end gap-3 pt-4 border-t">
-          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button type="submit" loading={loading}>{isEdit ? 'Update' : 'Create'}</Button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-// Partner Form Modal Component
-function PartnerFormModal({ isOpen, onClose, onSubmit, partner, areas, loading }) {
-  const isEdit = !!partner;
-  
-  return (
-    <Modal isOpen={isOpen} onClose={onClose} title={isEdit ? 'Edit Partner' : 'Add Partner'} size="md">
-      <form onSubmit={onSubmit} className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Full Name *</label>
-          <input
-            type="text"
-            name="name"
-            defaultValue={partner?.name}
-            required
-            className="input"
-            placeholder="Partner name"
-          />
-        </div>
-
-        {!isEdit && (
-          <>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Username *</label>
-              <input
-                type="text"
-                name="username"
-                required
-                className="input"
-                placeholder="username"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Password *</label>
-              <input
-                type="password"
-                name="password"
-                required
-                className="input"
-                placeholder="••••••••"
-              />
-            </div>
-          </>
-        )}
-
-        {isEdit && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">New Password (leave blank to keep current)</label>
-            <input
-              type="password"
-              name="password"
-              className="input"
-              placeholder="••••••••"
-            />
-          </div>
-        )}
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">Assigned Areas</label>
-          <div className="space-y-2 max-h-40 overflow-y-auto border rounded-lg p-3">
-            {areas.map(area => (
-              <label key={area.id || area._id} className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  name="areaIds"
-                  value={area.id || area._id}
-                  defaultChecked={partner?.areas?.some(a => (a.id || a._id || a) === (area.id || area._id))}
-                  className="rounded text-blue-600"
-                />
-                <span className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: area.color || '#3B82F6' }}></span>
-                  {area.name}
-                </span>
-              </label>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex justify-end gap-3 pt-4 border-t">
-          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button type="submit" loading={loading}>{isEdit ? 'Update' : 'Create'}</Button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-// Area Form Modal Component
-function AreaFormModal({ isOpen, onClose, onSubmit, loading }) {
-  return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Add Area" size="sm">
-      <form onSubmit={onSubmit} className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Area Name *</label>
-          <input
-            type="text"
-            name="name"
-            required
-            className="input"
-            placeholder="e.g., Downtown District"
-          />
-        </div>
-        
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-          <textarea
-            name="description"
-            className="input"
-            rows={2}
-            placeholder="Optional description"
-          />
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Color</label>
-          <input
-            type="color"
-            name="color"
-            defaultValue="#3B82F6"
-            className="w-full h-10 rounded-lg cursor-pointer"
-          />
-        </div>
-
-        <div className="flex justify-end gap-3 pt-4 border-t">
-          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button type="submit" loading={loading}>Create</Button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-// Change Password Modal Component
-function ChangePasswordModal({ isOpen, onClose, user, isOwnPassword, loading, onSubmit }) {
-  const [error, setError] = useState('');
-  const [showPasswords, setShowPasswords] = useState(false);
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setError('');
-    
-    const formData = new FormData(e.target);
-    const newPassword = formData.get('newPassword');
-    const confirmPassword = formData.get('confirmPassword');
-    const currentPassword = formData.get('currentPassword');
-
-    if (newPassword !== confirmPassword) {
-      setError('New passwords do not match');
-      return;
-    }
-
-    if (newPassword.length < 6) {
-      setError('Password must be at least 6 characters');
-      return;
-    }
-
-    const data = { newPassword };
-    
-    if (isOwnPassword) {
-      data.currentPassword = currentPassword;
-    } else {
-      data.userId = user.id || user._id;
-    }
-
-    await onSubmit(data);
-  };
-
-  return (
-    <Modal isOpen={isOpen} onClose={onClose} title={isOwnPassword ? 'Change Your Password' : `Change Password for ${user?.name}`} size="md">
-      <form onSubmit={handleSubmit} className="space-y-4">
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
-            {error}
-          </div>
-        )}
-
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-700">
-          <svg className="w-5 h-5 inline-block mr-2 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          {isOwnPassword 
-            ? 'Enter your current password and choose a new secure password.'
-            : `You are changing the password for user "${user?.name}". They will need to use this new password to login.`
-          }
-        </div>
-
-        {isOwnPassword && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Current Password *</label>
-            <input
-              type={showPasswords ? 'text' : 'password'}
-              name="currentPassword"
-              required
-              className="input"
-              placeholder="Enter your current password"
-            />
-          </div>
-        )}
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">New Password *</label>
-          <input
-            type={showPasswords ? 'text' : 'password'}
-            name="newPassword"
-            required
-            minLength={6}
-            className="input"
-            placeholder="Enter new password (min 6 characters)"
-          />
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Confirm New Password *</label>
-          <input
-            type={showPasswords ? 'text' : 'password'}
-            name="confirmPassword"
-            required
-            minLength={6}
-            className="input"
-            placeholder="Confirm new password"
-          />
-        </div>
-
-        <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={showPasswords}
-            onChange={(e) => setShowPasswords(e.target.checked)}
-            className="rounded border-gray-300"
-          />
-          Show passwords
-        </label>
-
-        <div className="flex justify-end gap-3 pt-4 border-t">
-          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button type="submit" loading={loading}>
-            {isOwnPassword ? 'Change Password' : 'Reset Password'}
-          </Button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-// Import Modal Component with Preview and Column Mapping
-function ImportModal({ isOpen, onClose, onImport, areas, loading, toast }) {
-  const [step, setStep] = useState('upload'); // 'upload' | 'preview' | 'mapping'
-  const [file, setFile] = useState(null);
-  const [preview, setPreview] = useState(null);
-  const [columnMapping, setColumnMapping] = useState({});
-  const [selectedSheet, setSelectedSheet] = useState(0);
-  const [areaId, setAreaId] = useState('');
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [filterText, setFilterText] = useState('');
-  const [groupByCountry, setGroupByCountry] = useState(false);
-
-  const TARGET_FIELDS = [
-    { key: 'name', label: 'Name', required: true },
-    { key: 'phone', label: 'Phone', required: false },
-    { key: 'email', label: 'Email', required: false },
-    { key: 'address', label: 'Address', required: false },
-    { key: 'notes', label: 'Notes', required: false },
-    { key: 'tags', label: 'Tags', required: false },
-  ];
-
-  const SUPPORTED_TYPES = '.csv,.xlsx,.xls,.json,.txt,.tsv';
-
-  // Reset state when modal closes
-  useEffect(() => {
-    if (!isOpen) {
-      setStep('upload');
-      setFile(null);
-      setPreview(null);
-      setColumnMapping({});
-      setSelectedSheet(0);
-      setAreaId('');
-      setFilterText('');
-      setGroupByCountry(false);
-    }
-  }, [isOpen]);
-
-  // Handle file selection
-  const handleFileSelect = async (e) => {
-    const selectedFile = e.target.files[0];
-    if (!selectedFile) return;
-
-    setFile(selectedFile);
-    setPreviewLoading(true);
-
-    try {
-      const result = await contactsApi.previewImport(selectedFile, selectedSheet);
-      setPreview(result);
-      setColumnMapping(result.suggestedMapping || {});
-      setStep('preview');
-    } catch (error) {
-      toast.error(error.message || 'Failed to parse file');
-      setFile(null);
-    } finally {
-      setPreviewLoading(false);
-    }
-  };
-
-  // Handle sheet change for Excel files
-  const handleSheetChange = async (e) => {
-    const newIndex = parseInt(e.target.value, 10);
-    setSelectedSheet(newIndex);
-    
-    if (file) {
-      setPreviewLoading(true);
-      try {
-        const result = await contactsApi.previewImport(file, newIndex);
-        setPreview(result);
-        setColumnMapping(result.suggestedMapping || {});
-      } catch (error) {
-        toast.error('Failed to load sheet');
-      } finally {
-        setPreviewLoading(false);
-      }
-    }
-  };
-
-  // Handle column mapping change
-  const handleMappingChange = (sourceCol, targetField) => {
-    setColumnMapping(prev => {
-      const newMapping = { ...prev };
-      // Remove previous mapping to this target field
-      Object.keys(newMapping).forEach(key => {
-        if (newMapping[key] === targetField && key !== sourceCol) {
-          delete newMapping[key];
-        }
-      });
-      if (targetField) {
-        newMapping[sourceCol] = targetField;
-      } else {
-        delete newMapping[sourceCol];
-      }
-      return newMapping;
-    });
-  };
-
-  // Filter preview data
-  const filteredPreview = preview?.preview?.filter(row => {
-    if (!filterText) return true;
-    const searchLower = filterText.toLowerCase();
-    return Object.values(row).some(val => 
-      String(val).toLowerCase().includes(searchLower)
-    );
-  }) || [];
-
-  // Check if name column is mapped
-  const hasNameMapping = Object.values(columnMapping).includes('name');
-
-  // Handle import
-  const handleImport = async () => {
-    if (!hasNameMapping) {
-      toast.error('Please map a column to "Name" field');
-      return;
-    }
-
-    try {
-      const result = await onImport(file, {
-        areaId: groupByCountry ? '' : areaId, // Don't use areaId if grouping by country
-        columnMapping,
-        sheetIndex: selectedSheet,
-        groupByCountry,
-      });
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <h2 className="text-lg font-semibold">{partnerList.length} Partners</h2>
+        <button 
+          onClick={onAdd}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium"
+        >
+          + Add Partner
+        </button>
+      </div>
       
-      let message = `Imported ${result.imported} contacts (${result.skipped} skipped)`;
-      if (result.countriesCreated && result.countriesCreated.length > 0) {
-        message += `. Created ${result.countriesCreated.length} country areas.`;
-      }
-      toast.success(message);
-    } catch (error) {
-      toast.error(error.message || 'Import failed');
-    }
-  };
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {partnerList.map(partner => (
+          <div key={partner.id} className="bg-white rounded-xl p-4 border border-gray-200 hover:shadow-md transition-shadow">
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="font-semibold text-gray-900">{partner.name}</h3>
+                <p className="text-sm text-gray-500">@{partner.username}</p>
+              </div>
+              <div className="flex gap-1">
+                <button onClick={() => onEdit(partner)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                </button>
+                <button onClick={() => onDelete(partner)} className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-1">
+              {partner.areas?.length > 0 ? (
+                partner.areas.map((area, i) => (
+                  <span key={i} className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs">
+                    {area.name || area}
+                  </span>
+                ))
+              ) : (
+                <span className="text-gray-400 text-sm">No areas</span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ===== Areas Tab =====
+function AreasTab({ areas, contacts, onAdd, onDelete }) {
+  const areaStats = useMemo(() => {
+    const stats = {};
+    areas.forEach(a => { stats[a.id] = 0; });
+    contacts.forEach(c => {
+      const areaId = c.areaId || c.area_id;
+      if (areaId && stats[areaId] !== undefined) stats[areaId]++;
+    });
+    return stats;
+  }, [areas, contacts]);
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Import Contacts" size="xl">
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <h2 className="text-lg font-semibold">{areas.length} Areas</h2>
+        <button 
+          onClick={onAdd}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium"
+        >
+          + Add Area
+        </button>
+      </div>
+      
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {areas.map(area => (
+          <div key={area.id} className="bg-white rounded-xl p-4 border border-gray-200 hover:shadow-md transition-shadow">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-4 h-4 rounded-full" style={{ backgroundColor: area.color || '#3B82F6' }} />
+                <h3 className="font-semibold text-gray-900">{area.name}</h3>
+              </div>
+              <button onClick={() => onDelete(area)} className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </button>
+            </div>
+            {area.description && <p className="text-sm text-gray-500 mt-2">{area.description}</p>}
+            <div className="mt-3 text-sm text-gray-600">
+              <strong>{areaStats[area.id] || 0}</strong> contacts
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ===== Modal Components =====
+
+function BulkAssignModal({ isOpen, onClose, partners, selectedCount, onAssign, loading }) {
+  const [selected, setSelected] = useState('');
+  
+  if (!isOpen) return null;
+  
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={`Assign ${selectedCount} Contacts`}>
       <div className="space-y-4">
-        {/* Step Indicator */}
-        <div className="flex items-center justify-center gap-2 mb-4">
-          <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${step === 'upload' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-500'}`}>
-            <span className="w-5 h-5 rounded-full bg-current bg-opacity-20 flex items-center justify-center text-xs">1</span>
-            Upload
-          </div>
-          <div className="w-8 h-px bg-gray-300"></div>
-          <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${step === 'preview' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-500'}`}>
-            <span className="w-5 h-5 rounded-full bg-current bg-opacity-20 flex items-center justify-center text-xs">2</span>
-            Preview & Map
-          </div>
-        </div>
-
-        {/* Upload Step */}
-        {step === 'upload' && (
-          <div className="space-y-4">
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <h4 className="font-medium text-blue-900 mb-2">Supported File Types</h4>
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-sm text-blue-700">
-                <div><span className="font-medium">Excel:</span> .xlsx, .xls</div>
-                <div><span className="font-medium">CSV:</span> .csv</div>
-                <div><span className="font-medium">JSON:</span> .json</div>
-                <div><span className="font-medium">Text:</span> .txt, .tsv</div>
-              </div>
-              <p className="text-sm text-blue-600 mt-2">
-                Required: <code className="bg-blue-100 px-1 rounded">name</code> column. 
-                Optional: phone, email, address, notes, tags
-              </p>
-            </div>
-
-            <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-400 transition-colors">
-              <input
-                type="file"
-                accept={SUPPORTED_TYPES}
-                onChange={handleFileSelect}
-                className="hidden"
-                id="file-upload"
-                disabled={previewLoading}
-              />
-              <label htmlFor="file-upload" className="cursor-pointer">
-                <div className="text-4xl mb-2">📁</div>
-                <p className="text-gray-700 font-medium">
-                  {previewLoading ? 'Processing...' : 'Click to select or drop a file'}
-                </p>
-                <p className="text-sm text-gray-500 mt-1">
-                  Excel, CSV, JSON, or Text files
-                </p>
-              </label>
-            </div>
-          </div>
-        )}
-
-        {/* Preview & Mapping Step */}
-        {step === 'preview' && preview && (
-          <div className="space-y-4">
-            {/* File Info */}
-            <div className="bg-gray-50 rounded-lg p-3 flex items-center justify-between">
-              <div>
-                <span className="font-medium">{preview.fileName}</span>
-                <span className="text-sm text-gray-500 ml-2">({preview.fileType.toUpperCase()})</span>
-                <span className="text-sm text-gray-500 ml-2">• {preview.totalRows} rows</span>
-              </div>
-              <Button variant="secondary" size="sm" onClick={() => {
-                setStep('upload');
-                setFile(null);
-                setPreview(null);
-              }}>
-                Change File
-              </Button>
-            </div>
-
-            {/* Sheet Selector for Excel */}
-            {preview.sheetNames?.length > 1 && (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Select Sheet</label>
-                <select 
-                  value={selectedSheet} 
-                  onChange={handleSheetChange}
-                  className="select"
-                  disabled={previewLoading}
-                >
-                  {preview.sheetNames.map((name, index) => (
-                    <option key={index} value={index}>{name}</option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            {/* Column Mapping */}
-            <div className="border rounded-lg p-4">
-              <h4 className="font-medium text-gray-900 mb-3">Column Mapping</h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {preview.headers?.map(header => (
-                  <div key={header} className="flex items-center gap-2">
-                    <span className="text-sm text-gray-600 truncate min-w-0 flex-1" title={header}>
-                      {header}
-                    </span>
-                    <span className="text-gray-400">→</span>
-                    <select
-                      value={columnMapping[header] || ''}
-                      onChange={(e) => handleMappingChange(header, e.target.value)}
-                      className="select text-sm py-1 flex-1"
-                    >
-                      <option value="">-- Skip --</option>
-                      {TARGET_FIELDS.map(field => (
-                        <option key={field.key} value={field.key}>
-                          {field.label} {field.required ? '*' : ''}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                ))}
-              </div>
-              {!hasNameMapping && (
-                <p className="text-red-500 text-sm mt-2">⚠️ Please map a column to "Name" field</p>
-              )}
-            </div>
-
-            {/* Area Assignment */}
-            <div className="space-y-3">
-              {/* Group by Country Toggle */}
-              <div className="flex items-center gap-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                <input
-                  type="checkbox"
-                  id="groupByCountry"
-                  checked={groupByCountry}
-                  onChange={(e) => setGroupByCountry(e.target.checked)}
-                  className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
-                />
-                <label htmlFor="groupByCountry" className="flex-1">
-                  <span className="font-medium text-blue-900">Group by Country Code</span>
-                  <p className="text-xs text-blue-700">Auto-create areas based on phone country codes (e.g., 🇺🇸 United States, 🇮🇳 India)</p>
-                </label>
-              </div>
-
-              {/* Area dropdown - disabled when grouping by country */}
-              {!groupByCountry && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Assign to Area</label>
-                  <select value={areaId} onChange={(e) => setAreaId(e.target.value)} className="select">
-                    <option value="">No Area</option>
-                    {areas.map(a => (
-                      <option key={a.id || a._id} value={a.id || a._id}>{a.name}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-            </div>
-
-            {/* Data Preview */}
-            <div className="border rounded-lg">
-              <div className="p-3 bg-gray-50 border-b flex items-center justify-between">
-                <h4 className="font-medium text-gray-900">Data Preview (first 10 rows)</h4>
-                <input
-                  type="text"
-                  placeholder="Filter preview..."
-                  value={filterText}
-                  onChange={(e) => setFilterText(e.target.value)}
-                  className="input text-sm py-1 px-2 w-48"
-                />
-              </div>
-              <div className="overflow-x-auto max-h-64">
-                <table className="min-w-full text-sm">
-                  <thead className="bg-gray-100 sticky top-0">
-                    <tr>
-                      {preview.headers?.map(header => (
-                        <th key={header} className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
-                          {header}
-                          {columnMapping[header] && (
-                            <span className="ml-1 text-blue-600 normal-case">→ {columnMapping[header]}</span>
-                          )}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {filteredPreview.map((row, idx) => (
-                      <tr key={idx} className="hover:bg-gray-50">
-                        {preview.headers?.map(header => (
-                          <td key={header} className="px-3 py-2 text-gray-700 whitespace-nowrap max-w-xs truncate" title={row[header]}>
-                            {row[header] || '-'}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {filteredPreview.length === 0 && (
-                  <div className="p-4 text-center text-gray-500">No matching rows</div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Actions */}
-        <div className="flex justify-between pt-4 border-t">
-          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-          <div className="flex gap-2">
-            {step === 'preview' && (
-              <Button 
-                onClick={handleImport} 
-                loading={loading}
-                disabled={!hasNameMapping || previewLoading}
-              >
-                Import {preview?.totalRows || 0} Contacts
-              </Button>
-            )}
-          </div>
+        <select 
+          value={selected} 
+          onChange={e => setSelected(e.target.value)}
+          className="w-full px-3 py-2 border rounded-lg"
+        >
+          <option value="">Select Partner</option>
+          {partners.map(p => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 border rounded-lg">Cancel</button>
+          <button 
+            onClick={() => onAssign(selected)}
+            disabled={!selected || loading}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg disabled:opacity-50"
+          >
+            {loading ? 'Assigning...' : 'Assign'}
+          </button>
         </div>
       </div>
     </Modal>
   );
 }
 
-// Bulk Assign Modal Component
-function BulkAssignModal({ isOpen, onClose, onSubmit, partners, selectedCount, loading, onCountryAssign, areas }) {
-  const [mode, setMode] = useState('selected'); // 'selected' | 'country' | 'area'
-  const [countryGroups, setCountryGroups] = useState([]);
-  const [selectedCountry, setSelectedCountry] = useState('');
-  const [selectedArea, setSelectedArea] = useState('');
-  const [loadingCountries, setLoadingCountries] = useState(false);
-
-  // Fetch country groups when switching to country mode
-  useEffect(() => {
-    if (mode === 'country' && countryGroups.length === 0) {
-      setLoadingCountries(true);
-      contactsApi.getCountryGroups()
-        .then(data => setCountryGroups(data.countries || []))
-        .catch(() => setCountryGroups([]))
-        .finally(() => setLoadingCountries(false));
-    }
-  }, [mode]);
-
-  // Reset on close
-  useEffect(() => {
-    if (!isOpen) {
-      setMode('selected');
-      setSelectedCountry('');
-      setSelectedArea('');
-    }
-  }, [isOpen]);
-
+function ContactFormModal({ isOpen, onClose, contact, areas, partners, onSuccess, toast }) {
+  const [loading, setLoading] = useState(false);
+  const isEdit = !!contact;
+  
   const handleSubmit = async (e) => {
     e.preventDefault();
-    const formData = new FormData(e.target);
-    const assignedTo = formData.get('assignedTo');
-    
-    if (!assignedTo) return;
-
-    if (mode === 'country' && selectedCountry) {
-      await onCountryAssign(selectedCountry, assignedTo);
-    } else if (mode === 'area' && selectedArea) {
-      await onCountryAssign(null, assignedTo, selectedArea);
-    } else {
-      onSubmit(e);
-    }
-  };
-
-  const selectedCountryInfo = countryGroups.find(c => c.countryCode === selectedCountry);
-  const selectedAreaInfo = areas?.find(a => (a.id || a._id) === selectedArea);
-
-  return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Assign Contacts" size="md">
-      <form onSubmit={handleSubmit} className="space-y-4">
-        {/* Mode Selector */}
-        <div className="flex gap-2 p-1 bg-gray-100 rounded-lg">
-          <button
-            type="button"
-            onClick={() => setMode('selected')}
-            className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
-              mode === 'selected' ? 'bg-white shadow text-blue-600' : 'text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            Selected ({selectedCount})
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode('country')}
-            className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
-              mode === 'country' ? 'bg-white shadow text-blue-600' : 'text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            By Country 🌍
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode('area')}
-            className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
-              mode === 'area' ? 'bg-white shadow text-blue-600' : 'text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            By Area
-          </button>
-        </div>
-
-        {/* Selected Mode */}
-        {mode === 'selected' && (
-          <p className="text-gray-600">
-            Assign <strong>{selectedCount}</strong> selected contact(s) to a partner.
-          </p>
-        )}
-
-        {/* Country Mode */}
-        {mode === 'country' && (
-          <div className="space-y-3">
-            {loadingCountries ? (
-              <div className="text-center py-4 text-gray-500">Loading countries...</div>
-            ) : countryGroups.length === 0 ? (
-              <div className="text-center py-4 text-gray-500">No contacts with country codes found</div>
-            ) : (
-              <>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Select Country *</label>
-                  <select 
-                    value={selectedCountry} 
-                    onChange={(e) => setSelectedCountry(e.target.value)}
-                    className="select"
-                    required={mode === 'country'}
-                  >
-                    <option value="">Choose a country</option>
-                    {countryGroups.map(c => (
-                      <option key={c.countryCode} value={c.countryCode}>
-                        {c.flag} {c.countryName} ({c.count} contacts, {c.unassignedCount} unassigned)
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                {selectedCountryInfo && (
-                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                    <div className="flex items-center gap-2">
-                      <span className="text-2xl">{selectedCountryInfo.flag}</span>
-                      <div>
-                        <p className="font-medium text-blue-900">{selectedCountryInfo.countryName}</p>
-                        <p className="text-sm text-blue-700">
-                          {selectedCountryInfo.count} total • {selectedCountryInfo.unassignedCount} unassigned
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Area Mode */}
-        {mode === 'area' && (
-          <div className="space-y-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Select Area *</label>
-              <select 
-                value={selectedArea} 
-                onChange={(e) => setSelectedArea(e.target.value)}
-                className="select"
-                required={mode === 'area'}
-              >
-                <option value="">Choose an area</option>
-                {areas?.map(a => (
-                  <option key={a.id || a._id} value={a.id || a._id}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            {selectedAreaInfo && (
-              <div className="bg-green-50 border border-green-200 rounded-lg p-3">
-                <p className="font-medium text-green-900">{selectedAreaInfo.name}</p>
-                <p className="text-sm text-green-700">{selectedAreaInfo.description || 'No description'}</p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Partner Selection */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Assign to Partner *</label>
-          <select name="assignedTo" required className="select">
-            <option value="">Select Partner</option>
-            {partners.filter(w => w.role === 'partner').map(w => (
-              <option key={w.id || w._id} value={w.id || w._id}>{w.name}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex justify-end gap-3 pt-4 border-t">
-          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button 
-            type="submit" 
-            loading={loading}
-            disabled={
-              (mode === 'selected' && selectedCount === 0) ||
-              (mode === 'country' && !selectedCountry) ||
-              (mode === 'area' && !selectedArea)
-            }
-          >
-            {mode === 'selected' && `Assign ${selectedCount} Contacts`}
-            {mode === 'country' && selectedCountryInfo && `Assign ${selectedCountryInfo.count} Contacts`}
-            {mode === 'country' && !selectedCountryInfo && 'Assign Contacts'}
-            {mode === 'area' && 'Assign Area Contacts'}
-          </Button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-// Recategorize Modal - Categorize existing contacts by country code
-function RecategorizeModal({ isOpen, onClose, onComplete, toast }) {
-  const [loading, setLoading] = useState(false);
-  const [preview, setPreview] = useState(null);
-  const [overwrite, setOverwrite] = useState(false);
-  const [result, setResult] = useState(null);
-
-  // Fetch preview when modal opens or overwrite changes
-  useEffect(() => {
-    if (isOpen) {
-      setLoading(true);
-      setResult(null);
-      contactsApi.previewRecategorize(overwrite)
-        .then(data => setPreview(data))
-        .catch(() => setPreview(null))
-        .finally(() => setLoading(false));
-    } else {
-      setPreview(null);
-      setResult(null);
-      setOverwrite(false);
-    }
-  }, [isOpen, overwrite]);
-
-  const handleRecategorize = async () => {
     setLoading(true);
+    
+    const formData = new FormData(e.target);
+    const data = {
+      name: formData.get('name'),
+      phone: formData.get('phone'),
+      email: formData.get('email') || null,
+      address: formData.get('address') || null,
+      areaId: formData.get('areaId') || null,
+      assignedTo: formData.get('assignedTo') || null,
+      priority: formData.get('priority') || 'normal',
+      notes: formData.get('notes') || '',
+    };
+    
+    if (isEdit) {
+      data.status = formData.get('status');
+    }
+
     try {
-      const data = await contactsApi.recategorize(overwrite);
-      setResult(data);
-      toast.success(`Categorized ${data.updated} contacts into ${data.countriesFound.length} countries`);
-      onComplete();
+      const result = isEdit 
+        ? await contactsApi.update(contact.id, data)
+        : await contactsApi.create(data);
+      toast.success(isEdit ? 'Contact updated' : 'Contact created');
+      onSuccess(result.data || result);
     } catch (error) {
-      toast.error(error.message || 'Failed to recategorize');
+      toast.error(error.message || 'Failed to save contact');
     } finally {
       setLoading(false);
     }
   };
-
+  
+  if (!isOpen) return null;
+  
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="🌍 Categorize by Country Code" size="lg">
-      <div className="space-y-4">
-        {/* Explanation */}
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-          <h4 className="font-medium text-blue-900 mb-2">How it works</h4>
-          <p className="text-sm text-blue-700">
-            This will analyze phone numbers in existing contacts and automatically create country-based areas 
-            (e.g., 🇺🇸 United States, 🇮🇳 India) based on the country code in each phone number.
-          </p>
+    <Modal isOpen={isOpen} onClose={onClose} title={isEdit ? 'Edit Contact' : 'Add Contact'} size="lg">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium mb-1">Name *</label>
+            <input name="name" defaultValue={contact?.name} required className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1">Phone *</label>
+            <input name="phone" defaultValue={contact?.phone} required className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+        </div>
+        
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium mb-1">Email</label>
+            <input name="email" type="email" defaultValue={contact?.email} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1">Area</label>
+            <select name="areaId" defaultValue={contact?.areaId || contact?.area_id || ''} className="w-full px-3 py-2 border rounded-lg">
+              <option value="">Select Area</option>
+              {areas.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </div>
         </div>
 
-        {/* Overwrite Toggle */}
-        <div className="flex items-center gap-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-          <input
-            type="checkbox"
-            id="overwriteAreas"
-            checked={overwrite}
-            onChange={(e) => setOverwrite(e.target.checked)}
-            className="w-4 h-4 text-yellow-600 rounded focus:ring-yellow-500"
+        <div>
+          <label className="block text-sm font-medium mb-1">Address</label>
+          <input name="address" defaultValue={contact?.address} className="w-full px-3 py-2 border rounded-lg" />
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium mb-1">Assign To</label>
+            <select name="assignedTo" defaultValue={contact?.assignedTo || contact?.assigned_to || ''} className="w-full px-3 py-2 border rounded-lg">
+              <option value="">Unassigned</option>
+              {partners.filter(p => p.role === 'partner').map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1">Priority</label>
+            <select name="priority" defaultValue={contact?.priority || 'normal'} className="w-full px-3 py-2 border rounded-lg">
+              {PRIORITY_OPTIONS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+            </select>
+          </div>
+        </div>
+
+        {isEdit && (
+          <div>
+            <label className="block text-sm font-medium mb-1">Status</label>
+            <select name="status" defaultValue={contact?.status || 'pending'} className="w-full px-3 py-2 border rounded-lg">
+              {STATUS_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+            </select>
+          </div>
+        )}
+
+        <div>
+          <label className="block text-sm font-medium mb-1">Notes</label>
+          <textarea name="notes" defaultValue={contact?.notes} rows={3} className="w-full px-3 py-2 border rounded-lg" />
+        </div>
+
+        <div className="flex justify-end gap-2 pt-4">
+          <button type="button" onClick={onClose} className="px-4 py-2 border rounded-lg">Cancel</button>
+          <button type="submit" disabled={loading} className="px-4 py-2 bg-blue-600 text-white rounded-lg disabled:opacity-50">
+            {loading ? 'Saving...' : (isEdit ? 'Update' : 'Create')}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function PartnerFormModal({ isOpen, onClose, partner, areas, onSuccess, toast }) {
+  const [loading, setLoading] = useState(false);
+  const isEdit = !!partner;
+  
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    
+    const formData = new FormData(e.target);
+    const selectedAreas = Array.from(formData.getAll('areaIds'));
+    
+    const data = {
+      name: formData.get('name'),
+      areaIds: selectedAreas,
+    };
+    
+    if (!isEdit) {
+      data.username = formData.get('username');
+      data.password = formData.get('password');
+      data.role = 'partner';
+    }
+    
+    const password = formData.get('password');
+    if (password && isEdit) data.password = password;
+
+    try {
+      const result = isEdit 
+        ? await usersApi.update(partner.id, data)
+        : await usersApi.create(data);
+      toast.success(isEdit ? 'Partner updated' : 'Partner created');
+      onSuccess(result.data || result);
+    } catch (error) {
+      toast.error(error.message || 'Failed to save partner');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  if (!isOpen) return null;
+  
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={isEdit ? 'Edit Partner' : 'Add Partner'}>
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {!isEdit && (
+          <div>
+            <label className="block text-sm font-medium mb-1">Username *</label>
+            <input name="username" required className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+        )}
+        
+        <div>
+          <label className="block text-sm font-medium mb-1">Name *</label>
+          <input name="name" defaultValue={partner?.name} required className="w-full px-3 py-2 border rounded-lg" />
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium mb-1">{isEdit ? 'New Password (leave blank to keep)' : 'Password *'}</label>
+          <input name="password" type="password" required={!isEdit} className="w-full px-3 py-2 border rounded-lg" />
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium mb-1">Assigned Areas</label>
+          <div className="max-h-40 overflow-y-auto border rounded-lg p-2">
+            {areas.map(area => (
+              <label key={area.id} className="flex items-center gap-2 py-1">
+                <input 
+                  type="checkbox" 
+                  name="areaIds" 
+                  value={area.id}
+                  defaultChecked={partner?.areas?.some(a => (a.id || a) === area.id)}
+                />
+                <span className="w-3 h-3 rounded-full" style={{ backgroundColor: area.color }} />
+                {area.name}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-4">
+          <button type="button" onClick={onClose} className="px-4 py-2 border rounded-lg">Cancel</button>
+          <button type="submit" disabled={loading} className="px-4 py-2 bg-blue-600 text-white rounded-lg disabled:opacity-50">
+            {loading ? 'Saving...' : (isEdit ? 'Update' : 'Create')}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function AreaFormModal({ isOpen, onClose, onSuccess, toast }) {
+  const [loading, setLoading] = useState(false);
+  
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    
+    const formData = new FormData(e.target);
+    const data = {
+      name: formData.get('name'),
+      description: formData.get('description') || '',
+      color: formData.get('color') || '#3B82F6',
+    };
+
+    try {
+      const result = await areasApi.create(data);
+      toast.success('Area created');
+      onSuccess(result.data || result);
+    } catch (error) {
+      toast.error(error.message || 'Failed to create area');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  if (!isOpen) return null;
+  
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Add Area">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label className="block text-sm font-medium mb-1">Name *</label>
+          <input name="name" required className="w-full px-3 py-2 border rounded-lg" />
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium mb-1">Description</label>
+          <input name="description" className="w-full px-3 py-2 border rounded-lg" />
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium mb-1">Color</label>
+          <input name="color" type="color" defaultValue="#3B82F6" className="w-16 h-10 border rounded-lg cursor-pointer" />
+        </div>
+
+        <div className="flex justify-end gap-2 pt-4">
+          <button type="button" onClick={onClose} className="px-4 py-2 border rounded-lg">Cancel</button>
+          <button type="submit" disabled={loading} className="px-4 py-2 bg-blue-600 text-white rounded-lg disabled:opacity-50">
+            {loading ? 'Creating...' : 'Create'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function ImportModal({ isOpen, onClose, areas, onSuccess, toast }) {
+  const [loading, setLoading] = useState(false);
+  const [preview, setPreview] = useState(null);
+  
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    try {
+      const text = await file.text();
+      const lines = text.trim().split('\n');
+      const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+      const rows = lines.slice(1, 6).map(line => {
+        const values = line.split(',');
+        return headers.reduce((obj, h, i) => {
+          obj[h] = values[i]?.trim() || '';
+          return obj;
+        }, {});
+      });
+      setPreview({ headers, rows, total: lines.length - 1 });
+    } catch (err) {
+      toast.error('Failed to read file');
+    }
+  };
+  
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    
+    const formData = new FormData(e.target);
+    const file = formData.get('file');
+    
+    if (!file) {
+      toast.error('Select a file');
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const lines = text.trim().split('\n');
+      const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+      
+      const contacts = lines.slice(1).map(line => {
+        const values = line.split(',');
+        return headers.reduce((obj, h, i) => {
+          obj[h] = values[i]?.trim() || '';
+          return obj;
+        }, {});
+      }).filter(c => c.name && c.phone);
+
+      await contactsApi.import({ contacts, areaId: formData.get('areaId') || null });
+      toast.success(`Imported ${contacts.length} contacts`);
+      onSuccess();
+    } catch (error) {
+      toast.error(error.message || 'Import failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  if (!isOpen) return null;
+  
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Import Contacts" size="lg">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label className="block text-sm font-medium mb-1">CSV File *</label>
+          <input 
+            type="file" 
+            name="file" 
+            accept=".csv" 
+            onChange={handleFileChange}
+            className="w-full px-3 py-2 border rounded-lg" 
           />
-          <label htmlFor="overwriteAreas" className="flex-1">
-            <span className="font-medium text-yellow-900">Overwrite existing area assignments</span>
-            <p className="text-xs text-yellow-700">If checked, contacts already assigned to an area will be reassigned based on their phone country code</p>
-          </label>
+          <p className="text-xs text-gray-500 mt-1">CSV with columns: name, phone, email, address</p>
+        </div>
+        
+        {preview && (
+          <div className="border rounded-lg p-3 bg-gray-50">
+            <p className="text-sm font-medium mb-2">Preview ({preview.total} rows found)</p>
+            <div className="overflow-x-auto">
+              <table className="text-xs w-full">
+                <thead>
+                  <tr>{preview.headers.map((h, i) => <th key={i} className="px-2 py-1 text-left">{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {preview.rows.map((row, i) => (
+                    <tr key={i}>{preview.headers.map((h, j) => <td key={j} className="px-2 py-1">{row[h]}</td>)}</tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        
+        <div>
+          <label className="block text-sm font-medium mb-1">Assign to Area</label>
+          <select name="areaId" className="w-full px-3 py-2 border rounded-lg">
+            <option value="">No Area</option>
+            {areas.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
         </div>
 
-        {/* Preview Results or Final Results */}
-        {result ? (
-          // Show results after recategorization
-          <div className="space-y-4">
-            <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-              <h4 className="font-medium text-green-900 mb-2">✅ Categorization Complete</h4>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                <div className="bg-white rounded p-2 text-center">
-                  <div className="text-2xl font-bold text-green-600">{result.updated}</div>
-                  <div className="text-gray-500">Updated</div>
-                </div>
-                <div className="bg-white rounded p-2 text-center">
-                  <div className="text-2xl font-bold text-gray-600">{result.skipped}</div>
-                  <div className="text-gray-500">Skipped</div>
-                </div>
-                <div className="bg-white rounded p-2 text-center">
-                  <div className="text-2xl font-bold text-yellow-600">{result.noPhone}</div>
-                  <div className="text-gray-500">No Phone</div>
-                </div>
-                <div className="bg-white rounded p-2 text-center">
-                  <div className="text-2xl font-bold text-red-600">{result.noCountry}</div>
-                  <div className="text-gray-500">Unknown Country</div>
-                </div>
-              </div>
-            </div>
-
-            {result.countriesFound.length > 0 && (
-              <div>
-                <h4 className="font-medium text-gray-900 mb-2">Countries Found</h4>
-                <div className="max-h-48 overflow-y-auto border rounded-lg">
-                  <table className="min-w-full text-sm">
-                    <thead className="bg-gray-50 sticky top-0">
-                      <tr>
-                        <th className="px-3 py-2 text-left">Country</th>
-                        <th className="px-3 py-2 text-right">Contacts</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y">
-                      {result.countriesFound.map(c => (
-                        <tr key={c.countryCode}>
-                          <td className="px-3 py-2">{c.flag} {c.countryName}</td>
-                          <td className="px-3 py-2 text-right font-medium">{c.count}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </div>
-        ) : preview ? (
-          // Show preview before recategorization
-          <div className="space-y-4">
-            <div className="bg-gray-50 border rounded-lg p-4">
-              <h4 className="font-medium text-gray-900 mb-2">Preview</h4>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                <div className="bg-white rounded p-2 text-center border">
-                  <div className="text-2xl font-bold text-blue-600">{preview.totalContacts}</div>
-                  <div className="text-gray-500">Total Contacts</div>
-                </div>
-                <div className="bg-white rounded p-2 text-center border">
-                  <div className="text-2xl font-bold text-green-600">{preview.wouldUpdate}</div>
-                  <div className="text-gray-500">Will Update</div>
-                </div>
-                <div className="bg-white rounded p-2 text-center border">
-                  <div className="text-2xl font-bold text-gray-600">{preview.wouldSkip}</div>
-                  <div className="text-gray-500">Will Skip</div>
-                </div>
-                <div className="bg-white rounded p-2 text-center border">
-                  <div className="text-2xl font-bold text-yellow-600">{preview.noPhone + preview.noCountry}</div>
-                  <div className="text-gray-500">No Country</div>
-                </div>
-              </div>
-            </div>
-
-            {preview.countries.length > 0 && (
-              <div>
-                <h4 className="font-medium text-gray-900 mb-2">Countries Detected ({preview.countries.length})</h4>
-                <div className="max-h-48 overflow-y-auto border rounded-lg">
-                  <table className="min-w-full text-sm">
-                    <thead className="bg-gray-50 sticky top-0">
-                      <tr>
-                        <th className="px-3 py-2 text-left">Country</th>
-                        <th className="px-3 py-2 text-right">Contacts</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y">
-                      {preview.countries.map(c => (
-                        <tr key={c.countryCode}>
-                          <td className="px-3 py-2">
-                            <span className="inline-flex items-center gap-2">
-                              <span>{c.flag}</span>
-                              <span>{c.countryName}</span>
-                              <span 
-                                className="w-3 h-3 rounded-full" 
-                                style={{ backgroundColor: c.color }}
-                              ></span>
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 text-right font-medium">{c.count}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {preview.countries.length === 0 && preview.wouldUpdate === 0 && (
-              <div className="text-center py-8 text-gray-500">
-                <div className="text-4xl mb-2">📱</div>
-                <p>No contacts with recognizable country codes found.</p>
-                <p className="text-sm">Make sure phone numbers include country codes (e.g., +1, +91)</p>
-              </div>
-            )}
-          </div>
-        ) : loading ? (
-          <div className="flex justify-center py-8">
-            <Spinner size="lg" className="text-blue-600" />
-          </div>
-        ) : null}
-
-        {/* Actions */}
-        <div className="flex justify-end gap-3 pt-4 border-t">
-          <Button type="button" variant="secondary" onClick={onClose}>
-            {result ? 'Close' : 'Cancel'}
-          </Button>
-          {!result && preview && preview.wouldUpdate > 0 && (
-            <Button 
-              onClick={handleRecategorize}
-              loading={loading}
-            >
-              Categorize {preview.wouldUpdate} Contacts
-            </Button>
-          )}
+        <div className="flex justify-end gap-2 pt-4">
+          <button type="button" onClick={onClose} className="px-4 py-2 border rounded-lg">Cancel</button>
+          <button type="submit" disabled={loading} className="px-4 py-2 bg-blue-600 text-white rounded-lg disabled:opacity-50">
+            {loading ? 'Importing...' : 'Import'}
+          </button>
         </div>
-      </div>
+      </form>
+    </Modal>
+  );
+}
+
+function ChangePasswordModal({ isOpen, onClose, user, toast }) {
+  const [loading, setLoading] = useState(false);
+  
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    
+    const formData = new FormData(e.target);
+    const newPassword = formData.get('newPassword');
+    const confirmPassword = formData.get('confirmPassword');
+    
+    if (newPassword !== confirmPassword) {
+      toast.error('Passwords do not match');
+      setLoading(false);
+      return;
+    }
+
+    try {
+      await authApi.changePassword({ 
+        currentPassword: formData.get('currentPassword'),
+        newPassword 
+      });
+      toast.success('Password changed');
+      onClose();
+    } catch (error) {
+      toast.error(error.message || 'Failed to change password');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  if (!isOpen) return null;
+  
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Change Password">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label className="block text-sm font-medium mb-1">Current Password *</label>
+          <input name="currentPassword" type="password" required className="w-full px-3 py-2 border rounded-lg" />
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium mb-1">New Password *</label>
+          <input name="newPassword" type="password" required minLength={6} className="w-full px-3 py-2 border rounded-lg" />
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium mb-1">Confirm Password *</label>
+          <input name="confirmPassword" type="password" required className="w-full px-3 py-2 border rounded-lg" />
+        </div>
+
+        <div className="flex justify-end gap-2 pt-4">
+          <button type="button" onClick={onClose} className="px-4 py-2 border rounded-lg">Cancel</button>
+          <button type="submit" disabled={loading} className="px-4 py-2 bg-blue-600 text-white rounded-lg disabled:opacity-50">
+            {loading ? 'Changing...' : 'Change Password'}
+          </button>
+        </div>
+      </form>
     </Modal>
   );
 }
