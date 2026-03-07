@@ -897,6 +897,12 @@ export default function AdminDashboard() {
                 </select>
 
                 <button
+                  onClick={() => setShowModal('import')}
+                  className="px-4 py-2 bg-gray-600 text-white rounded-lg font-medium text-sm whitespace-nowrap"
+                >
+                  📥 Import
+                </button>
+                <button
                   onClick={() => setShowModal('addContact')}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium text-sm whitespace-nowrap"
                 >
@@ -1006,6 +1012,15 @@ export default function AdminDashboard() {
           setShowModal(null);
           setEditItem(null);
         }}
+        toast={toast}
+      />
+
+      <ImportModal
+        isOpen={showModal === 'import'}
+        onClose={() => setShowModal(null)}
+        areas={areas}
+        partners={partners}
+        onSuccess={fetchAllData}
         toast={toast}
       />
 
@@ -1225,6 +1240,186 @@ function BulkAssignModal({ isOpen, onClose, partners, selectedCount, onAssign })
           </button>
         </div>
       </div>
+    </Modal>
+  );
+}
+
+// ===== Import Modal =====
+function ImportModal({ isOpen, onClose, areas, partners, onSuccess, toast }) {
+  const [loading, setLoading] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [file, setFile] = useState(null);
+  const [sheets, setSheets] = useState([]);
+  const [selectedSheet, setSelectedSheet] = useState(0);
+  const [areaId, setAreaId] = useState('');
+  const [assignedTo, setAssignedTo] = useState('');
+
+  const handleFileChange = async (e) => {
+    const selectedFile = e.target.files?.[0];
+    if (!selectedFile) return;
+    setFile(selectedFile);
+    setLoading(true);
+
+    try {
+      const response = await contactsApi.previewImport(selectedFile, selectedSheet);
+      const data = response.data || response;
+      setPreview(data);
+      if (data.sheets) setSheets(data.sheets);
+    } catch (err) {
+      toast.error(err.message || 'Failed to preview file');
+      setFile(null);
+      setPreview(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSheetChange = async (index) => {
+    setSelectedSheet(index);
+    if (!file) return;
+    setLoading(true);
+    try {
+      const response = await contactsApi.previewImport(file, index);
+      setPreview(response.data || response);
+    } catch (err) {
+      toast.error('Failed to load sheet');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!file) {
+      toast.error('Select a file first');
+      return;
+    }
+    setLoading(true);
+
+    try {
+      const response = await contactsApi.importFile(file, {
+        areaId: areaId || null,
+        assignedTo: assignedTo || null,
+        sheetIndex: selectedSheet,
+      });
+      const result = response.data || response;
+      toast.success(`Imported ${result.imported || result.count || 'contacts'} successfully!`);
+      onSuccess();
+      handleClose();
+    } catch (error) {
+      toast.error(error.message || 'Import failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleClose = () => {
+    setFile(null);
+    setPreview(null);
+    setSheets([]);
+    setSelectedSheet(0);
+    setAreaId('');
+    setAssignedTo('');
+    onClose();
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <Modal isOpen={isOpen} onClose={handleClose} title="Import Contacts" size="lg">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label className="block text-sm font-medium mb-2">Select File *</label>
+          <input
+            type="file"
+            onChange={handleFileChange}
+            accept=".csv,.xlsx,.xls,.json,.txt,.tsv"
+            className="w-full px-3 py-2 border rounded-lg text-sm file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+          />
+          <p className="text-xs text-gray-500 mt-1">Supported: CSV, Excel (.xlsx, .xls), JSON, TXT, TSV</p>
+        </div>
+
+        {sheets.length > 1 && (
+          <div>
+            <label className="block text-sm font-medium mb-1">Select Sheet</label>
+            <select
+              value={selectedSheet}
+              onChange={(e) => handleSheetChange(Number(e.target.value))}
+              className="w-full px-3 py-2 border rounded-lg"
+            >
+              {sheets.map((name, i) => (
+                <option key={i} value={i}>{name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {preview && (
+          <div className="border rounded-lg p-3 bg-gray-50 overflow-x-auto">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium">Preview ({preview.totalRows || preview.rows?.length || 0} rows)</span>
+              {preview.columns && (
+                <span className="text-xs text-gray-500">Columns: {preview.columns.join(', ')}</span>
+              )}
+            </div>
+            {preview.rows && preview.rows.length > 0 && (
+              <div className="max-h-40 overflow-y-auto">
+                <table className="text-xs w-full min-w-max">
+                  <thead className="sticky top-0 bg-gray-100">
+                    <tr>
+                      {(preview.columns || Object.keys(preview.rows[0])).map((col, i) => (
+                        <th key={i} className="px-2 py-1 text-left border-b font-medium">{col}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.rows.slice(0, 5).map((row, i) => (
+                      <tr key={i} className="hover:bg-gray-50">
+                        {(preview.columns || Object.keys(row)).map((col, j) => (
+                          <td key={j} className="px-2 py-1 border-b truncate max-w-[150px]">
+                            {row[col] || row[col.toLowerCase()] || '—'}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium mb-1">Assign to Area</label>
+            <select value={areaId} onChange={(e) => setAreaId(e.target.value)} className="w-full px-3 py-2 border rounded-lg">
+              <option value="">Auto-detect / None</option>
+              {areas.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1">Assign to Partner</label>
+            <select value={assignedTo} onChange={(e) => setAssignedTo(e.target.value)} className="w-full px-3 py-2 border rounded-lg">
+              <option value="">Unassigned</option>
+              {partners.filter(p => p.role === 'partner').map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-4">
+          <button type="button" onClick={handleClose} className="px-4 py-2 border rounded-lg">Cancel</button>
+          <button
+            type="submit"
+            disabled={loading || !file}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg disabled:opacity-50 flex items-center gap-2"
+          >
+            {loading ? (
+              <><span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span> Processing...</>
+            ) : (
+              <>📥 Import</>          )}
+          </button>
+        </div>
+      </form>
     </Modal>
   );
 }
