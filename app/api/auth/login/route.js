@@ -3,6 +3,8 @@ import bcrypt from 'bcryptjs';
 import { db, initializeDatabase, schema, eq, inArray } from '@/lib/turso';
 import { createToken } from '@/lib/auth';
 
+export const dynamic = 'force-dynamic';
+
 export async function POST(request) {
   await initializeDatabase();
   const database = db();
