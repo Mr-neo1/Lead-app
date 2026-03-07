@@ -16,9 +16,24 @@ export const users = sqliteTable('users', {
   password: text('password').notNull(),
   name: text('name').notNull(),
   email: text('email'),
+  phone: text('phone'), // Partner's phone number
+  profilePicture: text('profile_picture'), // Base64 or URL
   role: text('role', { enum: ['admin', 'partner', 'worker'] }).notNull().default('partner'),
   orgId: text('org_id').references(() => organizations.id),
   isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
+  useDefaultMessages: integer('use_default_messages', { mode: 'boolean' }).default(true), // Can use default messages
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+// ===== App Settings (Admin-controlled) =====
+export const appSettings = sqliteTable('app_settings', {
+  id: text('id').primaryKey(),
+  key: text('key').notNull().unique(), // Setting key like 'whatsapp_template', 'email_template'
+  value: text('value').notNull(), // JSON or plain text value
+  description: text('description'),
+  orgId: text('org_id').references(() => organizations.id),
+  updatedBy: text('updated_by').references(() => users.id),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });

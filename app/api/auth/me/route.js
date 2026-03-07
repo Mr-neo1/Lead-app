@@ -34,7 +34,11 @@ export async function GET(request) {
       id: user.id,
       username: user.username,
       name: user.name,
+      email: user.email,
+      phone: user.phone,
+      profilePicture: user.profilePicture,
       role: user.role,
+      useDefaultMessages: user.useDefaultMessages ?? true,
       areas: areas.map(a => ({ id: a.id, name: a.name }))
     });
   } catch (error) {

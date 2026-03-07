@@ -13,7 +13,7 @@ export async function PUT(request, { params }) {
 
   try {
     const { id } = params;
-    const { name, password, areaIds } = await request.json();
+    const { name, password, email, phone, useDefaultMessages, areaIds } = await request.json();
 
     const [user] = await database.select().from(schema.users)
       .where(eq(schema.users.id, id)).limit(1);
@@ -24,8 +24,20 @@ export async function PUT(request, { params }) {
     // Build update object
     const updateFields = { updatedAt: now() };
     
-    if (name) {
+    if (name !== undefined) {
       updateFields.name = name;
+    }
+    
+    if (email !== undefined) {
+      updateFields.email = email;
+    }
+    
+    if (phone !== undefined) {
+      updateFields.phone = phone;
+    }
+    
+    if (useDefaultMessages !== undefined) {
+      updateFields.useDefaultMessages = useDefaultMessages;
     }
 
     if (password) {

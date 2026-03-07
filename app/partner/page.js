@@ -4,33 +4,38 @@ import { useState, useEffect, useCallback, memo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { useToast } from '@/components/Toast';
-import { contactsApi } from '@/lib/api-client';
+import Modal from '@/components/Modal';
+import { contactsApi, settingsApi, uploadApi, authApi } from '@/lib/api-client';
 import { ROLES } from '@/lib/constants';
 
 // Translations
 const T = {
   en: {
     pending: 'Pending', accepted: 'Accepted', rejected: 'Rejected', followup: 'Follow Up',
-    search: 'Search by name, phone or address...', logout: 'Sign out',
+    search: 'Search contacts...', logout: 'Sign out', profile: 'Profile',
     noContacts: 'No contacts found', noAssigned: 'No contacts assigned yet',
-    tryFilters: 'Try adjusting your filters', contacts: 'contacts',
-    edit: 'Edit', call: 'Call', save: 'Save', saving: 'Saving...', notes: 'Add notes...',
+    tryFilters: 'Try adjusting filters', contacts: 'contacts',
+    edit: 'Edit', call: 'Call', whatsapp: 'WhatsApp', email: 'Email', save: 'Save', saving: 'Saving...', 
+    notes: 'Add notes...', allContacts: 'All', changePhoto: 'Change Photo', myProfile: 'My Profile',
+    changePassword: 'Change Password', currentPassword: 'Current Password', newPassword: 'New Password',
   },
   es: {
     pending: 'Pendientes', accepted: 'Aceptados', rejected: 'Rechazados', followup: 'Seguimiento',
-    search: 'Buscar por nombre, teléfono o dirección...', logout: 'Salir',
+    search: 'Buscar contactos...', logout: 'Salir', profile: 'Perfil',
     noContacts: 'No hay contactos', noAssigned: 'Sin contactos asignados',
-    tryFilters: 'Intenta ajustar los filtros', contacts: 'contactos',
-    edit: 'Editar', call: 'Llamar', save: 'Guardar', saving: 'Guardando...', notes: 'Agregar notas...',
+    tryFilters: 'Ajusta los filtros', contacts: 'contactos',
+    edit: 'Editar', call: 'Llamar', whatsapp: 'WhatsApp', email: 'Correo', save: 'Guardar', saving: 'Guardando...',
+    notes: 'Agregar notas...', allContacts: 'Todos', changePhoto: 'Cambiar Foto', myProfile: 'Mi Perfil',
+    changePassword: 'Cambiar Contraseña', currentPassword: 'Contraseña Actual', newPassword: 'Nueva Contraseña',
   },
 };
 
-// Status config with colors
+// Status config
 const STATUS = {
-  pending: { key: 'pending', color: 'bg-amber-500', light: 'bg-amber-50 text-amber-700 border-amber-200' },
-  accepted: { key: 'accepted', color: 'bg-emerald-500', light: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
-  rejected: { key: 'rejected', color: 'bg-rose-500', light: 'bg-rose-50 text-rose-700 border-rose-200' },
-  followup: { key: 'followup', color: 'bg-blue-500', light: 'bg-blue-50 text-blue-700 border-blue-200' },
+  pending: { key: 'pending', color: 'bg-amber-500', light: 'bg-amber-50 text-amber-700 border-amber-200', icon: '⏳' },
+  accepted: { key: 'accepted', color: 'bg-emerald-500', light: 'bg-emerald-50 text-emerald-700 border-emerald-200', icon: '✅' },
+  rejected: { key: 'rejected', color: 'bg-rose-500', light: 'bg-rose-50 text-rose-700 border-rose-200', icon: '❌' },
+  followup: { key: 'followup', color: 'bg-blue-500', light: 'bg-blue-50 text-blue-700 border-blue-200', icon: '📞' },
 };
 
 // Debounce hook
@@ -43,8 +48,50 @@ function useDebounce(value, delay) {
   return debouncedValue;
 }
 
-export default function WorkerDashboard() {
-  const { user, logout, loading: authLoading } = useAuth();
+// Profile Picture Component
+const ProfilePicture = memo(function ProfilePicture({ src, name, size = 'md', editable = false, onUpload, loading = false }) {
+  const inputRef = useRef(null);
+  const sizes = { sm: 'w-10 h-10 text-sm', md: 'w-14 h-14 text-lg', lg: 'w-20 h-20 text-2xl', xl: 'w-24 h-24 text-3xl' };
+
+  const handleClick = () => { if (editable && inputRef.current) inputRef.current.click(); };
+  const handleChange = (e) => { const file = e.target.files?.[0]; if (file && onUpload) onUpload(file); };
+
+  return (
+    <div className="relative inline-block">
+      <button
+        onClick={handleClick}
+        disabled={!editable || loading}
+        className={`${sizes[size]} rounded-full overflow-hidden flex items-center justify-center font-bold transition-all ${
+          editable ? 'cursor-pointer hover:ring-2 hover:ring-blue-400 hover:ring-offset-2' : 'cursor-default'
+        } ${loading ? 'opacity-50' : ''}`}
+        style={{ background: src ? 'transparent' : 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}
+      >
+        {src ? (
+          <img src={src} alt={name} className="w-full h-full object-cover" loading="lazy" />
+        ) : (
+          <span className="text-white">{name?.charAt(0)?.toUpperCase() || '?'}</span>
+        )}
+        {loading && (
+          <div className="absolute inset-0 bg-black/40 flex items-center justify-center rounded-full">
+            <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+          </div>
+        )}
+      </button>
+      {editable && (
+        <>
+          <input ref={inputRef} type="file" accept="image/*" onChange={handleChange} className="hidden" />
+          <div className="absolute -bottom-0.5 -right-0.5 w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center text-white text-xs shadow-lg border-2 border-white">
+            📷
+          </div>
+        </>
+      )}
+    </div>
+  );
+});
+
+// Main Partner Dashboard
+export default function PartnerDashboard() {
+  const { user, logout, loading: authLoading, refreshUser } = useAuth();
   const router = useRouter();
   const toast = useToast();
   const initialLoad = useRef(true);
@@ -52,21 +99,16 @@ export default function WorkerDashboard() {
   const [loading, setLoading] = useState(true);
   const [contacts, setContacts] = useState([]);
   const [stats, setStats] = useState({});
+  const [settings, setSettings] = useState({});
   const [selectedContact, setSelectedContact] = useState(null);
+  const [showProfile, setShowProfile] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState('');
   const [searchInput, setSearchInput] = useState('');
-  const [lang, setLang] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('app_language') || 'es';
-    }
-    return 'es';
-  });
-  
-  // Persist language to localStorage
-  useEffect(() => {
-    localStorage.setItem('app_language', lang);
-  }, [lang]);
+  const [uploadingPicture, setUploadingPicture] = useState(false);
+  const [lang, setLang] = useState(() => typeof window !== 'undefined' ? localStorage.getItem('app_language') || 'es' : 'es');
+
+  useEffect(() => { localStorage.setItem('app_language', lang); }, [lang]);
   
   const debouncedSearch = useDebounce(searchInput, 300);
   const t = T[lang];
@@ -77,21 +119,17 @@ export default function WorkerDashboard() {
     else if (!authLoading && user?.role === ROLES.ADMIN) router.push('/neo01x');
   }, [user, authLoading, router]);
 
-  // Fetch ALL contacts (no pagination)
+  // Fetch contacts and settings
   const fetchContacts = useCallback(async () => {
     if (!user) return;
     try {
       setLoading(true);
-      const params = { limit: 500 }; // Get all contacts
+      const params = { limit: 500 };
       if (statusFilter) params.status = statusFilter;
       if (debouncedSearch) params.search = debouncedSearch;
 
       const response = await contactsApi.getAll(params);
-      if (response?.data) {
-        setContacts(response.data);
-      } else if (Array.isArray(response)) {
-        setContacts(response);
-      }
+      setContacts(response?.data || response || []);
     } catch (error) {
       // Silent
     } finally {
@@ -109,24 +147,76 @@ export default function WorkerDashboard() {
     }
   }, [user]);
 
+  const fetchSettings = useCallback(async () => {
+    try {
+      const data = await settingsApi.getAll();
+      setSettings({
+        whatsapp_template: data.whatsapp_template?.value || '',
+        email_subject_template: data.email_subject_template?.value || '',
+        email_body_template: data.email_body_template?.value || '',
+        company_name: data.company_name?.value || '',
+      });
+    } catch (error) {
+      // Use empty defaults
+    }
+  }, []);
+
   useEffect(() => {
     if (user && user.role !== ROLES.ADMIN) {
       if (initialLoad.current) {
         fetchContacts();
         fetchStats();
+        fetchSettings();
         initialLoad.current = false;
       } else {
         fetchContacts();
       }
     }
-  }, [user, statusFilter, debouncedSearch, fetchContacts, fetchStats]);
+  }, [user, statusFilter, debouncedSearch, fetchContacts, fetchStats, fetchSettings]);
+
+  // Message template processor
+  const processTemplate = useCallback((template, contact) => {
+    if (!template) return '';
+    return template
+      .replace(/{contact_name}/g, contact.name || '')
+      .replace(/{partner_name}/g, user?.name || '')
+      .replace(/{area}/g, contact.areaName || contact.area_name || '')
+      .replace(/{company}/g, settings.company_name || '')
+      .replace(/{phone}/g, contact.phone || '');
+  }, [user, settings]);
+
+  // Generate WhatsApp URL with default message
+  const getWhatsAppUrl = useCallback((contact) => {
+    const phone = contact.phone?.replace(/[\s\-\(\)\+]/g, '');
+    if (!phone) return '#';
+    
+    // Only use default message if enabled for this user
+    if (user?.useDefaultMessages !== false && settings.whatsapp_template) {
+      const message = processTemplate(settings.whatsapp_template, contact);
+      return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
+    }
+    return `https://wa.me/${phone}`;
+  }, [user, settings, processTemplate]);
+
+  // Generate Email URL with default message
+  const getEmailUrl = useCallback((contact) => {
+    if (!contact.email) return '#';
+    
+    // Only use default message if enabled for this user
+    if (user?.useDefaultMessages !== false && settings.email_subject_template) {
+      const subject = processTemplate(settings.email_subject_template, contact);
+      const body = processTemplate(settings.email_body_template, contact);
+      return `mailto:${contact.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    }
+    return `mailto:${contact.email}`;
+  }, [user, settings, processTemplate]);
 
   // Quick status update
   const handleQuickStatus = async (contact, status) => {
     try {
       await contactsApi.update(contact.id, { status });
-      toast.success('Actualizado');
-      fetchContacts();
+      setContacts(prev => prev.map(c => c.id === contact.id ? { ...c, status } : c));
+      toast.success('✓');
       fetchStats();
     } catch {
       toast.error('Error');
@@ -144,7 +234,7 @@ export default function WorkerDashboard() {
         status: formData.get('status'),
         notes: formData.get('notes') || '',
       });
-      toast.success('Actualizado');
+      toast.success('✓');
       setSelectedContact(null);
       fetchContacts();
       fetchStats();
@@ -155,15 +245,30 @@ export default function WorkerDashboard() {
     }
   };
 
+  // Profile picture upload
+  const handleUploadPicture = async (file) => {
+    setUploadingPicture(true);
+    try {
+      await uploadApi.profilePicture(file);
+      toast.success('Photo updated');
+      if (refreshUser) await refreshUser();
+    } catch (error) {
+      toast.error(error.message || 'Upload failed');
+    } finally {
+      setUploadingPicture(false);
+    }
+  };
+
   if (authLoading || !user) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="w-8 h-8 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin"></div>
+        <div className="w-10 h-10 border-3 border-gray-300 border-t-indigo-600 rounded-full animate-spin"></div>
       </div>
     );
   }
 
   const displayStats = {
+    total: stats.total || contacts.length,
     pending: stats.pending || 0,
     accepted: stats.accepted || 0,
     rejected: stats.rejected || 0,
@@ -172,21 +277,22 @@ export default function WorkerDashboard() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/30 to-indigo-50/40">
-      {/* Top Bar */}
-      <header className="bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-500 px-4 py-4 sticky top-0 z-50 shadow-lg">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-white/20 backdrop-blur flex items-center justify-center text-white font-semibold text-sm ring-2 ring-white/30">
-              {user.name.charAt(0).toUpperCase()}
+      {/* Header */}
+      <header className="bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-500 px-4 py-4 sticky top-0 z-50 shadow-lg safe-area-inset-top">
+        <div className="max-w-2xl mx-auto flex items-center justify-between">
+          <button onClick={() => setShowProfile(true)} className="flex items-center gap-3">
+            <ProfilePicture src={user.profilePicture} name={user.name} size="sm" />
+            <div className="text-left">
+              <span className="font-semibold text-white block">{user.name.split(' ')[0]}</span>
+              <span className="text-xs text-white/70">{displayStats.total} {t.contacts}</span>
             </div>
-            <span className="font-semibold text-white">{user.name.split(' ')[0]}</span>
-          </div>
+          </button>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setLang(l => l === 'en' ? 'es' : 'en')}
               className="px-3 py-1.5 rounded-lg bg-white/20 backdrop-blur text-white text-sm font-medium hover:bg-white/30 transition-colors"
             >
-              {lang === 'en' ? '🇪🇸 ES' : '🇺🇸 EN'}
+              {lang === 'en' ? '🇪🇸' : '🇺🇸'}
             </button>
             <button onClick={logout} className="px-3 py-1.5 rounded-lg bg-white/20 backdrop-blur text-white text-sm font-medium hover:bg-white/30 transition-colors">
               {t.logout}
@@ -195,14 +301,29 @@ export default function WorkerDashboard() {
         </div>
       </header>
 
-      <div className="max-w-7xl mx-auto p-4">
-        {/* Stats Cards */}
-        <div className="grid grid-cols-4 gap-3 mb-6">
+      <div className="max-w-2xl mx-auto p-4 pb-24">
+        {/* Stats Cards - Horizontal Scroll on Mobile */}
+        <div className="flex gap-3 mb-5 overflow-x-auto pb-2 -mx-4 px-4 snap-x snap-mandatory scrollbar-hide">
+          <button
+            onClick={() => setStatusFilter('')}
+            className={`flex-shrink-0 snap-start p-4 rounded-2xl min-w-[100px] transition-all ${
+              !statusFilter
+                ? 'bg-gradient-to-br from-gray-800 to-gray-900 text-white shadow-lg scale-105'
+                : 'bg-white border border-gray-200'
+            }`}
+          >
+            <div className={`text-2xl font-bold ${!statusFilter ? 'text-white' : 'text-gray-900'}`}>
+              {displayStats.total}
+            </div>
+            <div className={`text-xs font-medium ${!statusFilter ? 'text-white/80' : 'text-gray-500'}`}>
+              {t.allContacts}
+            </div>
+          </button>
           {Object.entries(STATUS).map(([key, config]) => (
             <button
               key={key}
               onClick={() => setStatusFilter(f => f === key ? '' : key)}
-              className={`p-4 rounded-xl text-center transition-all ${
+              className={`flex-shrink-0 snap-start p-4 rounded-2xl min-w-[100px] transition-all ${
                 statusFilter === key
                   ? `${config.color} text-white shadow-lg scale-105`
                   : 'bg-white border border-gray-200 hover:border-gray-300'
@@ -219,45 +340,48 @@ export default function WorkerDashboard() {
         </div>
 
         {/* Search */}
-        <div className="mb-4">
+        <div className="mb-4 relative">
+          <svg className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
           <input
             type="text"
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder={t.search}
-            className="w-full px-4 py-2.5 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+            className="w-full pl-12 pr-4 py-3 bg-white border border-gray-200 rounded-2xl text-base focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent shadow-sm"
           />
         </div>
 
-        {/* Contacts Table */}
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          {loading ? (
-            <div className="p-8 text-center">
-              <div className="w-8 h-8 border-2 border-gray-300 border-t-indigo-600 rounded-full animate-spin mx-auto"></div>
-            </div>
-          ) : contacts.length === 0 ? (
-            <div className="p-8 text-center text-gray-500">
-              <p className="font-medium">{t.noContacts}</p>
-              <p className="text-sm mt-1">{searchInput || statusFilter ? t.tryFilters : t.noAssigned}</p>
-            </div>
-          ) : (
-            <div className="divide-y divide-gray-100">
-              {contacts.map((contact) => (
-                <ContactRow
-                  key={contact.id}
-                  contact={contact}
-                  t={t}
-                  onEdit={() => setSelectedContact(contact)}
-                  onQuickStatus={handleQuickStatus}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+        {/* Contacts List */}
+        {loading ? (
+          <div className="flex items-center justify-center py-16">
+            <div className="w-10 h-10 border-3 border-gray-300 border-t-indigo-600 rounded-full animate-spin"></div>
+          </div>
+        ) : contacts.length === 0 ? (
+          <div className="text-center py-16 bg-white rounded-3xl border border-gray-100">
+            <div className="text-6xl mb-4">📭</div>
+            <p className="font-medium text-gray-900">{t.noContacts}</p>
+            <p className="text-sm text-gray-500 mt-1">{searchInput || statusFilter ? t.tryFilters : t.noAssigned}</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {contacts.map((contact) => (
+              <ContactCard
+                key={contact.id}
+                contact={contact}
+                t={t}
+                onEdit={() => setSelectedContact(contact)}
+                onQuickStatus={handleQuickStatus}
+                getWhatsAppUrl={getWhatsAppUrl}
+                getEmailUrl={getEmailUrl}
+              />
+            ))}
+          </div>
+        )}
 
-        {/* Contact count */}
         {!loading && contacts.length > 0 && (
-          <div className="mt-3 text-center text-sm text-gray-400">
+          <div className="mt-4 text-center text-sm text-gray-400">
             {contacts.length} {t.contacts}
           </div>
         )}
@@ -271,209 +395,373 @@ export default function WorkerDashboard() {
           loading={actionLoading}
           onClose={() => setSelectedContact(null)}
           onSubmit={handleStatusUpdate}
+          getWhatsAppUrl={getWhatsAppUrl}
+          getEmailUrl={getEmailUrl}
+        />
+      )}
+
+      {/* Profile Modal */}
+      {showProfile && (
+        <ProfileModal
+          user={user}
+          t={t}
+          onClose={() => setShowProfile(false)}
+          onUploadPicture={handleUploadPicture}
+          uploadingPicture={uploadingPicture}
+          toast={toast}
+          refreshUser={refreshUser}
         />
       )}
     </div>
   );
 }
 
-// Contact Row Component
-const ContactRow = memo(function ContactRow({ contact, t, onEdit, onQuickStatus }) {
+// Contact Card Component
+const ContactCard = memo(function ContactCard({ contact, t, onEdit, onQuickStatus, getWhatsAppUrl, getEmailUrl }) {
   const config = STATUS[contact.status] || STATUS.pending;
 
   return (
-    <div className="flex items-center gap-4 px-4 py-3 hover:bg-gray-50 transition-colors">
-      {/* Avatar */}
-      <div className={`w-10 h-10 rounded-full ${config.color} flex items-center justify-center text-white font-medium text-sm shrink-0`}>
-        {contact.name.charAt(0).toUpperCase()}
+    <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 active:scale-[0.99] transition-transform">
+      {/* Header */}
+      <div className="flex items-start gap-3 mb-3">
+        <div className={`w-12 h-12 rounded-full ${config.color} flex items-center justify-center text-white font-bold text-lg flex-shrink-0`}>
+          {contact.name.charAt(0).toUpperCase()}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="font-semibold text-gray-900 truncate">{contact.name}</h3>
+            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${config.light} border flex-shrink-0`}>
+              {config.icon} {t[config.key]}
+            </span>
+          </div>
+          <p className="text-sm text-gray-500 mt-0.5">{contact.phone}</p>
+          {contact.address && <p className="text-xs text-gray-400 truncate mt-0.5">📍 {contact.address}</p>}
+        </div>
       </div>
 
-      {/* Info */}
-      <div className="flex-1 min-w-0">
-        <div className="font-medium text-gray-900 truncate">{contact.name}</div>
-        <div className="text-sm text-gray-500 truncate">{contact.phone}</div>
-      </div>
-
-      {/* Address (desktop) */}
-      <div className="hidden md:block flex-1 min-w-0">
-        <div className="text-sm text-gray-500 truncate">{contact.address || '—'}</div>
-      </div>
-
-      {/* Quick Actions */}
-      <div className="flex items-center gap-1.5">
+      {/* Quick Actions - Always Visible */}
+      <div className="grid grid-cols-4 gap-2 mb-3">
         <a
           href={`tel:${contact.phone}`}
-          className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center hover:bg-blue-100 transition-colors"
-          title="Llamar"
+          className="flex flex-col items-center gap-1 py-2.5 bg-blue-50 text-blue-600 rounded-xl hover:bg-blue-100 transition-colors"
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
-          </svg>
+          <span className="text-lg">📞</span>
+          <span className="text-xs font-medium">{t.call}</span>
         </a>
-        <button
-          onClick={() => window.open(`https://wa.me/${contact.phone.replace(/[\s\-\(\)\+]/g, '')}`, '_blank')}
-          className="w-8 h-8 rounded-lg bg-green-50 text-green-600 flex items-center justify-center hover:bg-green-100 transition-colors"
-          title="WhatsApp"
+        <a
+          href={getWhatsAppUrl(contact)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex flex-col items-center gap-1 py-2.5 bg-green-50 text-green-600 rounded-xl hover:bg-green-100 transition-colors"
         >
-          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-          </svg>
-        </button>
-        {contact.address && (
-          <button
-            onClick={() => window.open(`https://maps.google.com/?q=${encodeURIComponent(contact.address)}`, '_blank')}
-            className="w-8 h-8 rounded-lg bg-orange-50 text-orange-600 flex items-center justify-center hover:bg-orange-100 transition-colors"
-            title="Mapa"
+          <span className="text-lg">💬</span>
+          <span className="text-xs font-medium">WhatsApp</span>
+        </a>
+        {contact.email ? (
+          <a
+            href={getEmailUrl(contact)}
+            className="flex flex-col items-center gap-1 py-2.5 bg-purple-50 text-purple-600 rounded-xl hover:bg-purple-100 transition-colors"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-          </button>
+            <span className="text-lg">✉️</span>
+            <span className="text-xs font-medium">{t.email}</span>
+          </a>
+        ) : (
+          <div className="flex flex-col items-center gap-1 py-2.5 bg-gray-50 text-gray-300 rounded-xl">
+            <span className="text-lg">✉️</span>
+            <span className="text-xs font-medium">{t.email}</span>
+          </div>
+        )}
+        {contact.address ? (
+          <a
+            href={`https://maps.google.com/?q=${encodeURIComponent(contact.address)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex flex-col items-center gap-1 py-2.5 bg-orange-50 text-orange-600 rounded-xl hover:bg-orange-100 transition-colors"
+          >
+            <span className="text-lg">🗺️</span>
+            <span className="text-xs font-medium">Map</span>
+          </a>
+        ) : (
+          <div className="flex flex-col items-center gap-1 py-2.5 bg-gray-50 text-gray-300 rounded-xl">
+            <span className="text-lg">🗺️</span>
+            <span className="text-xs font-medium">Map</span>
+          </div>
         )}
       </div>
 
       {/* Status Buttons */}
-      <div className="flex gap-1">
-        {Object.entries(STATUS).map(([status, cfg]) => (
-          <button
-            key={status}
-            onClick={() => onQuickStatus(contact, status)}
-            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${
-              contact.status === status
-                ? `${cfg.color} text-white shadow-sm`
-                : 'bg-gray-100 text-gray-400 hover:bg-gray-200'
-            }`}
-            title={t[status]}
-          >
-            {status === 'pending' && (
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            )}
-            {status === 'accepted' && (
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-              </svg>
-            )}
-            {status === 'rejected' && (
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            )}
-            {status === 'followup' && (
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
-            )}
-          </button>
-        ))}
+      <div className="flex items-center gap-2">
+        <div className="flex gap-1 flex-1">
+          {Object.entries(STATUS).map(([status, cfg]) => (
+            <button
+              key={status}
+              onClick={() => onQuickStatus(contact, status)}
+              className={`flex-1 py-2 rounded-lg text-xs font-medium transition-all ${
+                contact.status === status
+                  ? `${cfg.color} text-white shadow-sm`
+                  : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+              }`}
+            >
+              {cfg.icon}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={onEdit}
+          className="px-4 py-2 bg-gray-900 text-white text-xs font-medium rounded-lg hover:bg-gray-800 transition-colors"
+        >
+          {t.edit}
+        </button>
       </div>
-
-      {/* Edit Button */}
-      <button
-        onClick={onEdit}
-        className="px-3 py-1.5 bg-gray-900 text-white text-xs font-medium rounded-lg hover:bg-gray-800 transition-colors"
-      >
-        {t.edit}
-      </button>
     </div>
   );
 });
 
 // Edit Modal
-function EditModal({ contact, t, loading, onClose, onSubmit }) {
+function EditModal({ contact, t, loading, onClose, onSubmit, getWhatsAppUrl, getEmailUrl }) {
   const config = STATUS[contact.status] || STATUS.pending;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose}></div>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose}></div>
       
-      <div className="relative bg-white rounded-2xl w-full max-w-md shadow-2xl">
+      <div className="relative bg-white rounded-t-3xl sm:rounded-3xl w-full max-w-md shadow-2xl max-h-[90vh] overflow-y-auto safe-area-inset-bottom">
+        {/* Drag Handle (mobile) */}
+        <div className="sm:hidden flex justify-center pt-3 pb-1">
+          <div className="w-10 h-1 bg-gray-300 rounded-full"></div>
+        </div>
+
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 sticky top-0 bg-white z-10">
           <h2 className="font-semibold text-gray-900">{t.edit}</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+          <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400">
+            ✕
           </button>
         </div>
 
         <form onSubmit={onSubmit} className="p-5 space-y-4">
           {/* Contact Info */}
-          <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
-            <div className={`w-12 h-12 rounded-full ${config.color} flex items-center justify-center text-white font-semibold`}>
+          <div className="flex items-center gap-3 p-4 bg-gradient-to-r from-gray-50 to-gray-100 rounded-2xl">
+            <div className={`w-14 h-14 rounded-full ${config.color} flex items-center justify-center text-white font-bold text-xl`}>
               {contact.name.charAt(0).toUpperCase()}
             </div>
-            <div>
-              <p className="font-medium text-gray-900">{contact.name}</p>
+            <div className="min-w-0 flex-1">
+              <p className="font-semibold text-gray-900 truncate">{contact.name}</p>
               <p className="text-sm text-gray-500">{contact.phone}</p>
+              {contact.email && <p className="text-xs text-gray-400 truncate">{contact.email}</p>}
             </div>
           </div>
 
-          {/* Quick Actions */}
-          <div className="grid grid-cols-2 gap-2">
-            <a href={`tel:${contact.phone}`} className="py-2.5 bg-blue-500 text-white rounded-lg text-center text-sm font-medium">
-              {t.call}
+          {/* Action Buttons */}
+          <div className="grid grid-cols-3 gap-2">
+            <a href={`tel:${contact.phone}`} className="py-3 bg-blue-500 text-white rounded-xl text-center text-sm font-medium flex items-center justify-center gap-1">
+              📞 {t.call}
             </a>
-            <button
-              type="button"
-              onClick={() => window.open(`https://wa.me/${contact.phone.replace(/[\s\-\(\)\+]/g, '')}`, '_blank')}
-              className="py-2.5 bg-green-500 text-white rounded-lg text-center text-sm font-medium"
-            >
-              WhatsApp
-            </button>
+            <a href={getWhatsAppUrl(contact)} target="_blank" rel="noopener noreferrer" className="py-3 bg-green-500 text-white rounded-xl text-center text-sm font-medium flex items-center justify-center gap-1">
+              💬 WhatsApp
+            </a>
+            {contact.email ? (
+              <a href={getEmailUrl(contact)} className="py-3 bg-purple-500 text-white rounded-xl text-center text-sm font-medium flex items-center justify-center gap-1">
+                ✉️ {t.email}
+              </a>
+            ) : (
+              <div className="py-3 bg-gray-200 text-gray-400 rounded-xl text-center text-sm font-medium">
+                ✉️ {t.email}
+              </div>
+            )}
           </div>
 
           {/* Status Selection */}
-          <div className="grid grid-cols-4 gap-2">
-            {Object.entries(STATUS).map(([status, cfg]) => (
-              <label
-                key={status}
-                className={`flex flex-col items-center py-3 rounded-xl cursor-pointer transition-all border-2 ${
-                  contact.status === status
-                    ? `${cfg.color} text-white border-transparent`
-                    : 'bg-gray-50 text-gray-600 border-gray-200 hover:border-gray-300'
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="status"
-                  value={status}
-                  defaultChecked={contact.status === status}
-                  className="sr-only"
-                />
-                <span className="text-xs font-medium">{t[status]}</span>
-              </label>
-            ))}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
+            <div className="grid grid-cols-4 gap-2">
+              {Object.entries(STATUS).map(([status, cfg]) => (
+                <label
+                  key={status}
+                  className={`flex flex-col items-center py-3 rounded-xl cursor-pointer transition-all border-2 ${
+                    contact.status === status
+                      ? `${cfg.color} text-white border-transparent shadow-lg`
+                      : 'bg-gray-50 text-gray-600 border-gray-200 hover:border-gray-300'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="status"
+                    value={status}
+                    defaultChecked={contact.status === status}
+                    className="sr-only"
+                  />
+                  <span className="text-lg mb-1">{cfg.icon}</span>
+                  <span className="text-xs font-medium">{t[status]}</span>
+                </label>
+              ))}
+            </div>
           </div>
 
           {/* Notes */}
-          <textarea
-            name="notes"
-            defaultValue={contact.notes}
-            placeholder={t.notes}
-            rows={2}
-            className="w-full px-3 py-2 bg-gray-50 rounded-xl border border-gray-200 resize-none text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Notes</label>
+            <textarea
+              name="notes"
+              defaultValue={contact.notes}
+              placeholder={t.notes}
+              rows={3}
+              className="w-full px-4 py-3 bg-gray-50 rounded-xl border border-gray-200 resize-none text-base focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
 
           {/* Submit */}
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-3 bg-gray-900 text-white font-medium rounded-xl disabled:opacity-50 flex items-center justify-center gap-2"
+            className="w-full py-4 bg-gray-900 text-white font-semibold rounded-xl disabled:opacity-50 flex items-center justify-center gap-2 text-base"
           >
             {loading ? (
               <>
-                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
                 {t.saving}
               </>
             ) : (
-              t.save
+              <>✓ {t.save}</>
             )}
           </button>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// Profile Modal
+function ProfileModal({ user, t, onClose, onUploadPicture, uploadingPicture, toast, refreshUser }) {
+  const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [changing, setChanging] = useState(false);
+
+  const handlePasswordChange = async (e) => {
+    e.preventDefault();
+    setChanging(true);
+    const formData = new FormData(e.target);
+    const currentPassword = formData.get('currentPassword');
+    const newPassword = formData.get('newPassword');
+
+    try {
+      await authApi.changePassword({ currentPassword, newPassword });
+      toast.success('Password changed');
+      e.target.reset();
+      setShowPasswordForm(false);
+    } catch (error) {
+      toast.error(error.message || 'Failed');
+    } finally {
+      setChanging(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose}></div>
+      
+      <div className="relative bg-white rounded-t-3xl sm:rounded-3xl w-full max-w-md shadow-2xl safe-area-inset-bottom">
+        {/* Drag Handle */}
+        <div className="sm:hidden flex justify-center pt-3 pb-1">
+          <div className="w-10 h-1 bg-gray-300 rounded-full"></div>
+        </div>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+          <h2 className="font-semibold text-gray-900">{t.myProfile}</h2>
+          <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400">
+            ✕
+          </button>
+        </div>
+
+        <div className="p-5 space-y-6">
+          {/* Profile Picture */}
+          <div className="flex flex-col items-center">
+            <ProfilePicture
+              src={user.profilePicture}
+              name={user.name}
+              size="xl"
+              editable
+              loading={uploadingPicture}
+              onUpload={onUploadPicture}
+            />
+            <p className="text-xs text-gray-500 mt-3">{t.changePhoto}</p>
+          </div>
+
+          {/* User Info */}
+          <div className="bg-gray-50 rounded-2xl p-4 space-y-3">
+            <div className="flex justify-between">
+              <span className="text-sm text-gray-500">Name</span>
+              <span className="text-sm font-medium text-gray-900">{user.name}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-sm text-gray-500">Username</span>
+              <span className="text-sm font-medium text-gray-900">@{user.username}</span>
+            </div>
+            {user.email && (
+              <div className="flex justify-between">
+                <span className="text-sm text-gray-500">Email</span>
+                <span className="text-sm font-medium text-gray-900 truncate ml-2">{user.email}</span>
+              </div>
+            )}
+            {user.phone && (
+              <div className="flex justify-between">
+                <span className="text-sm text-gray-500">Phone</span>
+                <span className="text-sm font-medium text-gray-900">{user.phone}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Areas */}
+          {user.areas?.length > 0 && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Assigned Areas</label>
+              <div className="flex flex-wrap gap-2">
+                {user.areas.map((area, i) => (
+                  <span key={i} className="px-3 py-1 bg-blue-50 text-blue-700 rounded-full text-sm">
+                    {area.name || area}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Change Password */}
+          <div>
+            <button
+              onClick={() => setShowPasswordForm(!showPasswordForm)}
+              className="w-full py-3 border border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              🔒 {t.changePassword}
+            </button>
+
+            {showPasswordForm && (
+              <form onSubmit={handlePasswordChange} className="mt-4 space-y-3">
+                <input
+                  type="password"
+                  name="currentPassword"
+                  placeholder={t.currentPassword}
+                  required
+                  className="w-full px-4 py-3 border border-gray-200 rounded-xl"
+                />
+                <input
+                  type="password"
+                  name="newPassword"
+                  placeholder={t.newPassword}
+                  required
+                  minLength={6}
+                  className="w-full px-4 py-3 border border-gray-200 rounded-xl"
+                />
+                <button
+                  type="submit"
+                  disabled={changing}
+                  className="w-full py-3 bg-gray-900 text-white rounded-xl font-medium disabled:opacity-50"
+                >
+                  {changing ? 'Changing...' : 'Update Password'}
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

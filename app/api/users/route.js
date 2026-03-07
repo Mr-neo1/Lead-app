@@ -27,7 +27,11 @@ export async function GET(request) {
         id: user.id,
         username: user.username,
         name: user.name,
+        email: user.email,
+        phone: user.phone,
+        profilePicture: user.profilePicture,
         role: user.role,
+        useDefaultMessages: user.useDefaultMessages ?? true,
         createdAt: user.createdAt,
         areas: areas.map(a => ({ id: a.id, name: a.name }))
       };
@@ -49,7 +53,7 @@ export async function POST(request) {
   if (auth.error) return auth.error;
 
   try {
-    const { username, password, name, role, areaIds } = await request.json();
+    const { username, password, name, email, phone, role, useDefaultMessages, areaIds } = await request.json();
 
     if (!username || !password || !name) {
       return NextResponse.json({ error: 'Username, password, and name required' }, { status: 400 });
@@ -69,7 +73,10 @@ export async function POST(request) {
       username,
       password: hashedPassword,
       name,
+      email: email || null,
+      phone: phone || null,
       role: userRole,
+      useDefaultMessages: useDefaultMessages ?? true,
       createdAt: now(),
       updatedAt: now()
     });
