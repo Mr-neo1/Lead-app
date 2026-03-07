@@ -1303,7 +1303,9 @@ function ImportModal({ isOpen, onClose, areas, partners, onSuccess, toast }) {
         sheetIndex: selectedSheet,
       });
       const result = response.data || response;
-      toast.success(`Imported ${result.imported || result.count || 'contacts'} successfully!`);
+      // Use API message or construct one
+      const msg = result.message || `Imported ${result.imported || 0} contacts${result.duplicates ? `, ${result.duplicates} duplicates skipped` : ''}`;
+      toast.success(msg);
       onSuccess();
       handleClose();
     } catch (error) {

@@ -199,8 +199,26 @@ export async function POST(request) {
       }, { status: 400 });
     }
 
-    // Find phone column for country detection
+    // Find phone column for country detection and duplicate checking
     const phoneColumn = Object.entries(mapping).find(([k, v]) => v === 'phone')?.[0];
+
+    // Normalize phone number for comparison (remove non-digits except +)
+    const normalizePhone = (phone) => {
+      if (!phone) return null;
+      return phone.replace(/[^\d+]/g, '').trim();
+    };
+
+    // Fetch all existing phone numbers from database for duplicate check
+    const existingContacts = await database.select({ phone: schema.contacts.phone })
+      .from(schema.contacts);
+    const existingPhones = new Set(
+      existingContacts
+        .map(c => normalizePhone(c.phone))
+        .filter(Boolean)
+    );
+
+    // Track phones being imported in this batch to avoid duplicates within file
+    const importedPhones = new Set();
 
     // Cache for country areas (countryCode -> areaId)
     const countryAreaCache = {};
@@ -243,67 +261,89 @@ export async function POST(request) {
 
     let imported = 0;
     let skipped = 0;
+    let duplicates = 0;
     const countriesCreated = new Set();
 
     for (const row of rows) {
       const name = row[nameColumn]?.trim();
       
-      if (name) {
-        const timestamp = now();
-        const contactData = {
-          id: generateId(),
-          name,
-          phone: null,
-          email: null,
-          address: null,
-          notes: '',
-          tags: null,
-          areaId: area_id || null,
-          assignedTo: assigned_to || null,
-          status: 'pending',
-          priority: 'normal',
-          createdAt: timestamp,
-          updatedAt: timestamp
-        };
+      if (!name) {
+        skipped++;
+        continue;
+      }
 
-        // Apply column mapping
-        Object.entries(mapping).forEach(([sourceCol, targetField]) => {
-          if (targetField !== 'name' && row[sourceCol] !== undefined) {
-            const value = row[sourceCol]?.trim() || '';
-            if (targetField === 'tags' && value) {
-              contactData.tags = JSON.stringify(value.split(',').map(t => t.trim()).filter(Boolean));
-            } else {
-              contactData[targetField] = value || null;
-            }
-          }
-        });
+      // Get phone from row using mapping
+      let rawPhone = null;
+      if (phoneColumn && row[phoneColumn]) {
+        rawPhone = row[phoneColumn]?.trim();
+      }
+      const normalizedPhone = normalizePhone(rawPhone);
 
-        // If groupByCountry is enabled and no area_id was provided, detect country from phone
-        if (groupByCountry && !area_id && contactData.phone) {
-          const countryInfo = parsePhoneCountry(contactData.phone);
-          if (countryInfo && countryInfo.countryCode) {
-            const countryAreaId = await getOrCreateCountryArea(countryInfo.countryCode);
-            contactData.areaId = countryAreaId;
-            countriesCreated.add(countryInfo.countryCode);
+      // Check for duplicate phone number
+      if (normalizedPhone) {
+        if (existingPhones.has(normalizedPhone) || importedPhones.has(normalizedPhone)) {
+          duplicates++;
+          continue;
+        }
+        importedPhones.add(normalizedPhone);
+      }
+
+      const timestamp = now();
+      const contactData = {
+        id: generateId(),
+        name,
+        phone: rawPhone || null,
+        email: null,
+        address: null,
+        notes: '',
+        tags: null,
+        areaId: area_id || null,
+        assignedTo: assigned_to || null,
+        status: 'pending',
+        priority: 'normal',
+        createdAt: timestamp,
+        updatedAt: timestamp
+      };
+
+      // Apply column mapping (except phone which is already handled)
+      Object.entries(mapping).forEach(([sourceCol, targetField]) => {
+        if (targetField !== 'name' && targetField !== 'phone' && row[sourceCol] !== undefined) {
+          const value = row[sourceCol]?.trim() || '';
+          if (targetField === 'tags' && value) {
+            contactData.tags = JSON.stringify(value.split(',').map(t => t.trim()).filter(Boolean));
+          } else {
+            contactData[targetField] = value || null;
           }
         }
+      });
 
-        await database.insert(schema.contacts).values(contactData);
-        imported++;
-      } else {
-        skipped++;
+      // If groupByCountry is enabled and no area_id was provided, detect country from phone
+      if (groupByCountry && !area_id && contactData.phone) {
+        const countryInfo = parsePhoneCountry(contactData.phone);
+        if (countryInfo && countryInfo.countryCode) {
+          const countryAreaId = await getOrCreateCountryArea(countryInfo.countryCode);
+          contactData.areaId = countryAreaId;
+          countriesCreated.add(countryInfo.countryCode);
+        }
       }
+
+      await database.insert(schema.contacts).values(contactData);
+      imported++;
     }
 
     return NextResponse.json({ 
       success: true, 
       imported, 
       skipped,
+      duplicates,
       total: rows.length,
       fileType: ext,
       headers: headers,
       countriesCreated: Array.from(countriesCreated),
-      groupedByCountry: groupByCountry
+      groupedByCountry: groupByCountry,
+      message: duplicates > 0 
+        ? `Imported ${imported} contacts. ${duplicates} duplicates skipped (phone already exists).`
+        : `Imported ${imported} contacts successfully.`
     });
   } catch (error) {
     console.error('Import contacts error:', error);
