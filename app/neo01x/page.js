@@ -784,6 +784,30 @@ export default function AdminDashboard() {
     } catch { toast.error('Export failed'); }
   };
 
+  const handleRemoveDuplicates = async () => {
+    try {
+      // First preview
+      const preview = await contactsApi.previewDuplicates();
+      const data = preview.data || preview;
+      
+      if (data.totalDuplicates === 0) {
+        toast.success('No duplicates found!');
+        return;
+      }
+      
+      if (!confirm(`Found ${data.totalDuplicates} duplicate contacts in ${data.duplicateGroups} phone number groups.\n\nRemove duplicates? (Keeps oldest entry for each phone number)`)) {
+        return;
+      }
+      
+      // Remove duplicates
+      const result = await contactsApi.removeDuplicates(false);
+      toast.success(result.data?.message || result.message || `Removed ${result.removed} duplicates`);
+      fetchAllData();
+    } catch (error) {
+      toast.error(error.message || 'Failed to remove duplicates');
+    }
+  };
+
   const toggleSelection = (id) => setSelectedIds(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]);
   const toggleSelectAll = () => setSelectedIds(selectedIds.length === filteredContacts.length ? [] : filteredContacts.map(c => c.id));
 
@@ -811,6 +835,9 @@ export default function AdminDashboard() {
             </div>
             <div className="flex items-center gap-2">
               <button onClick={fetchAllData} className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg" title="Refresh">🔄</button>
+              <button onClick={handleRemoveDuplicates} className="hidden sm:flex px-3 py-2 text-sm bg-orange-100 hover:bg-orange-200 text-orange-700 rounded-lg font-medium items-center gap-2" title="Remove duplicate phone numbers">
+                🧹 Dedupe
+              </button>
               <button onClick={handleExport} className="hidden sm:flex px-3 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded-lg font-medium items-center gap-2">
                 📥 Export
               </button>

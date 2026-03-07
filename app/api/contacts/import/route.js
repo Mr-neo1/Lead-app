@@ -202,10 +202,19 @@ export async function POST(request) {
     // Find phone column for country detection and duplicate checking
     const phoneColumn = Object.entries(mapping).find(([k, v]) => v === 'phone')?.[0];
 
-    // Normalize phone number for comparison (remove non-digits except +)
+    // Normalize phone number for comparison
+    // Handles country codes: +52 722 549 3975 and 722 549 3975 should match
     const normalizePhone = (phone) => {
       if (!phone) return null;
-      return phone.replace(/[^\d+]/g, '').trim();
+      // Remove all non-digits
+      let digits = phone.replace(/\D/g, '');
+      if (!digits) return null;
+      // If 10+ digits, extract last 10 as local number for comparison
+      // This handles entries with/without country codes
+      if (digits.length >= 10) {
+        return digits.slice(-10);
+      }
+      return digits;
     };
 
     // Fetch all existing phone numbers from database for duplicate check
