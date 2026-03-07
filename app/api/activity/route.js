@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { db, initializeDatabase, schema, eq, desc, inArray } from '@/lib/turso';
 import { verifyToken } from '@/lib/auth';
+
+export const dynamic = 'force-dynamic';
 import {
   errorResponse,
   paginatedResponse,

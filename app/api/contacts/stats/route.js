@@ -2,8 +2,7 @@ import { NextResponse } from 'next/server';
 import { db, initializeDatabase, schema, eq } from '@/lib/turso';
 import { requireAuth } from '@/lib/auth';
 
-// Revalidate stats every 30 seconds
-export const revalidate = 30;
+export const dynamic = 'force-dynamic';
 
 // Get contact stats
 export async function GET(request) {

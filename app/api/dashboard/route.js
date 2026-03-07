@@ -6,8 +6,7 @@ import { ROLES } from '@/lib/constants';
 // Node.js runtime (required for jsonwebtoken)
 export const runtime = 'nodejs';
 
-// Revalidate every 30 seconds
-export const revalidate = 30;
+export const dynamic = 'force-dynamic';
 
 /**
  * Batched Dashboard API

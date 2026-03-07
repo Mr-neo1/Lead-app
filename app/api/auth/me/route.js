@@ -3,6 +3,8 @@ import jwt from 'jsonwebtoken';
 import { db, initializeDatabase, schema, eq, inArray } from '@/lib/turso';
 import { JWT_SECRET } from '@/lib/auth';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(request) {
   await initializeDatabase();
   const database = db();
